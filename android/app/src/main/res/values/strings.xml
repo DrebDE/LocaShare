@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LocaShare</string>
+    <string name="notification_channel_name">Active Location Sharing</string>
+    <string name="notification_channel_desc">Shows a persistent notification whenever LocaShare is sharing your phone location.</string>
+    <string name="notification_title">LocaShare: Sharing Location</string>
+    <string name="notification_stop_action">Stop Sharing</string>
+    <string name="permission_explanation">LocaShare needs location permission so you can share your phone’s latest coordinates with your paired laptop dashboard. Location is sent only after you tap “Start sharing” and displays a persistent notification with a Stop button at all times.</string>
+</resources>

@@ -1,0 +1,23 @@
+# Environment & Secrets
+.env
+backend/.env
+
+# Local SQLite Database & WAL files
+backend/database/*.sqlite
+backend/database/*.sqlite-shm
+backend/database/*.sqlite-wal
+
+# Runtime Logs
+backend/logs/*.log
+
+# Android Build & Local SDK Config
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/*.iml
+android/.idea/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db

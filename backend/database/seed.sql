@@ -1,0 +1,15 @@
+-- LocaShare Reference Seed Notes
+--
+-- LocaShare uses self-service device registration and short-lived single-use
+-- pairing codes instead of hardcoded device credentials or account logins.
+--
+-- To initialize the database schema:
+--   1. For SQLite (zero-config): set LOCASHARE_DB_DRIVER=sqlite and run:
+--        php backend/database/setup.php
+--   2. For MySQL/MariaDB (XAMPP): import backend/database/schema.sql or run:
+--        php backend/database/setup.php
+--
+-- Once running:
+--   1. Open the Android app and tap "Register this device".
+--   2. Enter or scan the displayed one-time pairing code in the laptop dashboard.
+--   3. Grant location permission and tap "Start sharing" on the phone.
