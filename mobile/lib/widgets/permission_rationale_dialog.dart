@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// Shows an honest, plain-language explanation before triggering Android's
-/// system location & notification permission prompt.
+/// system location permission prompt.
 Future<bool> showPermissionRationaleDialog(BuildContext context) async {
   final confirmed = await showDialog<bool>(
     context: context,
@@ -21,7 +21,7 @@ Future<bool> showPermissionRationaleDialog(BuildContext context) async {
             ),
             SizedBox(height: 6),
             Text(
-              '• While sharing runs in the background, a visible Android notification always stays on screen with a Stop sharing button.',
+              '• LocaShare only requests Location access and can be paused anytime with "Stop sharing".',
             ),
             SizedBox(height: 6),
             Text(

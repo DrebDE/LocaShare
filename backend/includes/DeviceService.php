@@ -305,7 +305,9 @@ class DeviceService
         $nowUtc = gmdate('Y-m-d H:i:s', $now);
 
         $currentStmt = $db->prepare('
-            SELECT sharing_enabled, status_state, battery_percentage, is_charging, network_status
+            SELECT sharing_enabled, status_state, presence_mode, current_place_id,
+                   current_place_name, smart_home_mode,
+                   battery_percentage, is_charging, network_status
             FROM device_status
             WHERE device_id = ?
             LIMIT 1
@@ -314,6 +316,10 @@ class DeviceService
         $current = $currentStmt->fetch() ?: [
             'sharing_enabled'    => 0,
             'status_state'       => 'registered',
+            'presence_mode'      => 'unknown',
+            'current_place_id'   => null,
+            'current_place_name' => null,
+            'smart_home_mode'    => 1,
             'battery_percentage' => null,
             'is_charging'        => null,
             'network_status'     => 'unknown',
@@ -336,6 +342,21 @@ class DeviceService
         } elseif (!$sharingEnabled && $pairedCount > 0 && $statusState === 'waiting_for_pairing') {
             $statusState = 'registered';
         }
+
+        $presenceMode = array_key_exists('presence_mode', $payload) && $payload['presence_mode'] !== null
+            ? Security::validatePresenceMode($payload['presence_mode'], (string) ($current['presence_mode'] ?? 'unknown'))
+            : (string) ($current['presence_mode'] ?? 'unknown');
+        $currentPlaceId = array_key_exists('current_place_id', $payload)
+            ? (Security::isValidIdentifier($payload['current_place_id']) ? trim((string) $payload['current_place_id']) : null)
+            : $current['current_place_id'];
+        $currentPlaceName = array_key_exists('current_place_name', $payload)
+            ? ($payload['current_place_name'] !== null && trim((string) $payload['current_place_name']) !== ''
+                ? Security::sanitizeDeviceName($payload['current_place_name'], '')
+                : null)
+            : $current['current_place_name'];
+        $smartHomeMode = array_key_exists('smart_home_mode', $payload) && $payload['smart_home_mode'] !== null
+            ? ((bool) $payload['smart_home_mode'] ? 1 : 0)
+            : (int) ($current['smart_home_mode'] ?? 1);
 
         $battery = array_key_exists('battery', $payload) && $payload['battery'] !== null
             ? min(100, max(0, (int) $payload['battery']))
@@ -360,6 +381,10 @@ class DeviceService
             UPDATE device_status
             SET sharing_enabled    = ?,
                 status_state       = ?,
+                presence_mode      = ?,
+                current_place_id   = ?,
+                current_place_name = ?,
+                smart_home_mode    = ?,
                 battery_percentage = ?,
                 is_charging        = ?,
                 network_status     = ?,
@@ -370,6 +395,10 @@ class DeviceService
         $upd->execute([
             $sharingEnabled,
             $statusState,
+            $presenceMode,
+            $currentPlaceId,
+            $currentPlaceName,
+            $smartHomeMode,
             $battery,
             $isCharging,
             $network,
@@ -421,6 +450,21 @@ class DeviceService
             ? substr(trim($payload['network_type']), 0, 20)
             : null;
 
+        $presenceMode = Security::validatePresenceMode($payload['presence_mode'] ?? null, 'away');
+        $currentPlaceId = isset($payload['current_place_id']) && Security::isValidIdentifier($payload['current_place_id'])
+            ? trim((string) $payload['current_place_id'])
+            : null;
+        $currentPlaceName = isset($payload['current_place_name']) && is_string($payload['current_place_name']) && trim($payload['current_place_name']) !== ''
+            ? Security::sanitizeDeviceName($payload['current_place_name'], '')
+            : null;
+        $homePrivacyMasked = !empty($payload['home_privacy_masked']) ? 1 : 0;
+        $smartHomeMode = array_key_exists('smart_home_mode', $payload)
+            ? ((bool) $payload['smart_home_mode'] ? 1 : 0)
+            : null;
+        $speedMps = isset($payload['speed_mps']) && is_numeric($payload['speed_mps']) && !is_bool($payload['speed_mps'])
+            ? max(0.0, min(200.0, round((float) $payload['speed_mps'], 2)))
+            : null;
+
         $now = time();
         $nowUtc = gmdate('Y-m-d H:i:s', $now);
 
@@ -428,8 +472,52 @@ class DeviceService
         $db->beginTransaction();
 
         try {
+            // Look up active family circle & saved places for Home privacy enforcement and sync
+            $circleStmt = $db->prepare('
+                SELECT circle_id FROM circle_members
+                WHERE device_id = ? AND left_at IS NULL
+                ORDER BY joined_at DESC
+                LIMIT 1
+            ');
+            $circleStmt->execute([$deviceDbId]);
+            $circleRow = $circleStmt->fetch();
+            $circlePlaces = [];
+
+            if ($circleRow) {
+                $placesStmt = $db->prepare('
+                    SELECT place_id, name, category, latitude, longitude, radius_meters,
+                           is_home, notify_on_enter, notify_on_exit
+                    FROM saved_places
+                    WHERE circle_id = ? AND deleted_at IS NULL
+                    ORDER BY is_home DESC, created_at ASC
+                ');
+                $placesStmt->execute([(int) $circleRow['circle_id']]);
+                foreach ($placesStmt->fetchAll() as $pRow) {
+                    $placeItem = [
+                        'place_id'        => (string) $pRow['place_id'],
+                        'name'            => (string) $pRow['name'],
+                        'category'        => (string) $pRow['category'],
+                        'latitude'        => (float) $pRow['latitude'],
+                        'longitude'       => (float) $pRow['longitude'],
+                        'radius_meters'   => (int) $pRow['radius_meters'],
+                        'is_home'         => (bool) $pRow['is_home'],
+                        'notify_on_enter' => (bool) $pRow['notify_on_enter'],
+                        'notify_on_exit'  => (bool) $pRow['notify_on_exit'],
+                    ];
+                    $circlePlaces[] = $placeItem;
+                    if ($homePrivacyMasked === 1 && $presenceMode === 'at_home' && $placeItem['is_home']) {
+                        // Server-side Home privacy enforcement: store Home center instead of indoor GPS jitter
+                        $latitude = $placeItem['latitude'];
+                        $longitude = $placeItem['longitude'];
+                        $currentPlaceId = $currentPlaceId ?? $placeItem['place_id'];
+                        $currentPlaceName = $currentPlaceName ?? $placeItem['name'];
+                        $speedMps = 0.0;
+                    }
+                }
+            }
+
             $curStmt = $db->prepare('
-                SELECT location_recorded_at, battery_percentage, is_charging, network_status
+                SELECT location_recorded_at, battery_percentage, is_charging, network_status, smart_home_mode
                 FROM device_status
                 WHERE device_id = ?
                 LIMIT 1
@@ -445,6 +533,7 @@ class DeviceService
             $finalBattery  = $battery !== null ? $battery : ($current['battery_percentage'] ?? null);
             $finalCharging = $isCharging !== null ? $isCharging : ($current['is_charging'] ?? null);
             $finalNetwork  = $network !== null ? $network : ($current['network_status'] ?? 'unknown');
+            $finalSmartHome = $smartHomeMode !== null ? $smartHomeMode : (int) ($current['smart_home_mode'] ?? 1);
 
             $ignoredOlderFix = false;
             if ($existingEpoch !== null && $recordedEpoch < $existingEpoch) {
@@ -475,6 +564,12 @@ class DeviceService
                     UPDATE device_status
                     SET sharing_enabled      = 1,
                         status_state         = \'sharing\',
+                        presence_mode        = ?,
+                        current_place_id     = ?,
+                        current_place_name   = ?,
+                        home_privacy_masked  = ?,
+                        smart_home_mode      = ?,
+                        speed_mps            = ?,
                         battery_percentage   = ?,
                         is_charging          = ?,
                         network_status       = ?,
@@ -488,6 +583,12 @@ class DeviceService
                     WHERE device_id = ?
                 ');
                 $upd->execute([
+                    $presenceMode,
+                    $currentPlaceId,
+                    $currentPlaceName,
+                    $homePrivacyMasked,
+                    $finalSmartHome,
+                    $speedMps,
                     $finalBattery,
                     $finalCharging,
                     $finalNetwork,
@@ -514,6 +615,9 @@ class DeviceService
                 'received_at'             => gmdate('Y-m-d\TH:i:s\Z', $now),
                 'paired_dashboards_count' => $pairedCount,
                 'status_state'            => 'sharing',
+                'presence_mode'           => $presenceMode,
+                'home_privacy_masked'     => (bool) $homePrivacyMasked,
+                'places'                  => $circlePlaces,
             ];
         } catch (Throwable $e) {
             if ($db->inTransaction()) {
@@ -539,6 +643,11 @@ class DeviceService
                 last_accuracy        = NULL,
                 location_recorded_at = NULL,
                 location_received_at = NULL,
+                presence_mode        = \'unknown\',
+                current_place_id     = NULL,
+                current_place_name   = NULL,
+                home_privacy_masked  = 0,
+                speed_mps            = NULL,
                 updated_at           = ?
             WHERE device_id = ?
         ');
@@ -663,6 +772,11 @@ class DeviceService
                 UPDATE device_status
                 SET sharing_enabled      = 0,
                     status_state         = \'unregistered\',
+                    presence_mode        = \'unknown\',
+                    current_place_id     = NULL,
+                    current_place_name   = NULL,
+                    home_privacy_masked  = 0,
+                    speed_mps            = NULL,
                     last_latitude        = NULL,
                     last_longitude       = NULL,
                     last_accuracy        = NULL,
@@ -672,6 +786,16 @@ class DeviceService
                 WHERE device_id = ?
             ');
             $stmtStatus->execute([$nowUtc, $deviceDbId]);
+
+            $stmtCircle = $db->prepare('
+                UPDATE circle_members
+                SET left_at = ?
+                WHERE device_id = ? AND left_at IS NULL
+            ');
+            $stmtCircle->execute([$nowUtc, $deviceDbId]);
+
+            $stmtPush = $db->prepare('DELETE FROM push_tokens WHERE device_id = ?');
+            $stmtPush->execute([$deviceDbId]);
 
             $db->commit();
 
@@ -703,6 +827,12 @@ class DeviceService
                 d.registered_at,
                 ds.sharing_enabled,
                 ds.status_state,
+                ds.presence_mode,
+                ds.current_place_id,
+                ds.current_place_name,
+                ds.home_privacy_masked,
+                ds.smart_home_mode,
+                ds.speed_mps,
                 ds.battery_percentage,
                 ds.is_charging,
                 ds.network_status,
@@ -745,6 +875,11 @@ class DeviceService
             'device_name'             => (string) $row['device_name'],
             'sharing_enabled'         => (bool) $row['sharing_enabled'],
             'status_state'            => (string) $row['status_state'],
+            'presence_mode'           => (string) ($row['presence_mode'] ?? 'unknown'),
+            'current_place_id'        => $row['current_place_id'],
+            'current_place_name'      => $row['current_place_name'],
+            'home_privacy_masked'     => (bool) ($row['home_privacy_masked'] ?? false),
+            'smart_home_mode'         => (bool) ($row['smart_home_mode'] ?? true),
             'paired_dashboards_count' => $pairedCount,
             'has_active_pairing'      => $pairedCount > 0,
             'has_active_pairing_code' => (bool) $activeCode,
@@ -779,6 +914,12 @@ class DeviceService
                 ddp.paired_at,
                 ds.sharing_enabled,
                 ds.status_state,
+                ds.presence_mode,
+                ds.current_place_id,
+                ds.current_place_name,
+                ds.home_privacy_masked,
+                ds.smart_home_mode,
+                ds.speed_mps,
                 ds.battery_percentage,
                 ds.is_charging,
                 ds.network_status,
@@ -962,7 +1103,7 @@ class DeviceService
      * Format a paired device row for dashboard consumption, keeping heartbeat online state
      * strictly separate from location-fix freshness.
      */
-    private static function formatDeviceForDashboard(
+    public static function formatDeviceForDashboard(
         array $row,
         int $now,
         int $onlineThreshold,
@@ -1014,10 +1155,16 @@ class DeviceService
         return [
             'device_id'             => (string) $row['device_id'],
             'device_name'           => (string) $row['device_name'],
-            'paired_at'             => self::toIsoUtc($row['paired_at']),
+            'paired_at'             => isset($row['paired_at']) ? self::toIsoUtc($row['paired_at']) : null,
             'sharing_enabled'       => $sharingEnabled,
             'status_state'          => $effectiveState,
             'reported_state'        => $reportedState,
+            'presence_mode'         => (string) ($row['presence_mode'] ?? 'unknown'),
+            'current_place_id'      => $row['current_place_id'] ?? null,
+            'current_place_name'    => $row['current_place_name'] ?? null,
+            'home_privacy_masked'   => (bool) ($row['home_privacy_masked'] ?? false),
+            'smart_home_mode'       => (bool) ($row['smart_home_mode'] ?? true),
+            'speed_mps'             => isset($row['speed_mps']) && $row['speed_mps'] !== null ? (float) $row['speed_mps'] : null,
             'is_online'             => $isOnline,
             'connection_state'      => $connectionState,
             'last_heartbeat_at'     => self::toIsoUtc($row['last_heartbeat_at']),
@@ -1111,7 +1258,7 @@ class DeviceService
     /**
      * Convert a database UTC datetime ('Y-m-d H:i:s') to ISO-8601 ('Y-m-d\TH:i:s\Z').
      */
-    private static function toIsoUtc(?string $dbDateTime): ?string
+    public static function toIsoUtc(?string $dbDateTime): ?string
     {
         if ($dbDateTime === null || trim($dbDateTime) === '') {
             return null;

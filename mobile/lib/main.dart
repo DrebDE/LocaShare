@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'screens/home_screen.dart';
+import 'screens/main_shell.dart';
 import 'services/locashare_api.dart';
 import 'services/location_controller.dart';
 import 'services/native_bridge.dart';
@@ -39,7 +39,7 @@ class _LocaShareAppState extends State<LocaShareApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'LocaShare',
+      title: 'LocaShare Family',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -47,7 +47,7 @@ class _LocaShareAppState extends State<LocaShareApp> {
         ),
         useMaterial3: true,
       ),
-      home: HomeScreen(controller: _controller),
+      home: MainShell(controller: _controller),
     );
   }
 }

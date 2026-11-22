@@ -4,6 +4,9 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import '../models/device_state.dart';
+import '../models/family_models.dart';
+
 class ApiResponse<T> {
   const ApiResponse({
     required this.ok,
@@ -275,6 +278,370 @@ class LocaShareApi {
         body: jsonEncode({'device_id': deviceId}),
       ),
       (_) {},
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Unified Family Circle, Saved Places & Supabase Cloud Methods
+  // ──────────────────────────────────────────────────────────────
+
+  Map<String, String> _supabaseHeaders(String anonKey) => {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
+        'apikey': anonKey,
+        'Authorization': 'Bearer $anonKey',
+      };
+
+  Uri _supabaseRpc(String supabaseUrl, String rpcName) {
+    final base = supabaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    return Uri.parse('$base/rest/v1/rpc/$rpcName');
+  }
+
+  Future<ApiResponse<void>> checkBackendHealth(DeviceTrackerState s) async {
+    if (s.isSupabaseMode) {
+      if (!s.hasValidSupabaseConfig) {
+        return const ApiResponse(
+          ok: false,
+          statusCode: 0,
+          error: 'Enter a valid https:// Supabase Project URL and anon key.',
+        );
+      }
+      return _execute<void>(
+        () => _client.get(
+          Uri.parse('${s.supabaseUrl.trim().replaceAll(RegExp(r'/+$'), '')}/rest/v1/'),
+          headers: _supabaseHeaders(s.supabaseAnonKey),
+        ),
+        (_) {},
+      );
+    }
+    return checkHealth(s.serverUrl);
+  }
+
+  Future<ApiResponse<RegistrationResult>> registerDeviceForBackend({
+    required DeviceTrackerState state,
+    required String deviceName,
+  }) async {
+    if (state.isSupabaseMode) {
+      return _execute<RegistrationResult>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_register_device'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({'p_device_name': deviceName}),
+        ),
+        (json) => RegistrationResult(
+          deviceId: (json['device_id'] as String?) ?? '',
+          deviceName: (json['device_name'] as String?) ?? deviceName,
+          deviceToken: (json['device_token'] as String?) ?? '',
+          pairingCode: '',
+          pairingQrPayload: '',
+          pairingExpiresAt: null,
+          statusState: (json['status_state'] as String?) ?? 'registered',
+        ),
+      );
+    }
+    return registerDevice(serverUrl: state.serverUrl, deviceName: deviceName);
+  }
+
+  Future<ApiResponse<FamilySnapshot>> createFamilyCircle({
+    required DeviceTrackerState state,
+    required String circleName,
+    required String memberName,
+  }) async {
+    if (state.isSupabaseMode) {
+      return _execute<FamilySnapshot>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_create_family_circle'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+            'p_circle_name': circleName,
+            'p_member_name': memberName,
+          }),
+        ),
+        FamilySnapshot.fromJson,
+      );
+    }
+    return _execute<FamilySnapshot>(
+      () => _client.post(
+        _endpoint(state.serverUrl, '/api/family/circle/create.php'),
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Authorization': 'Bearer ${state.deviceToken}',
+        },
+        body: jsonEncode({
+          'device_id': state.deviceId,
+          'name': circleName,
+          'member_name': memberName,
+        }),
+      ),
+      FamilySnapshot.fromJson,
+    );
+  }
+
+  Future<ApiResponse<FamilySnapshot>> joinFamilyCircle({
+    required DeviceTrackerState state,
+    required String inviteCode,
+    required String memberName,
+  }) async {
+    if (state.isSupabaseMode) {
+      return _execute<FamilySnapshot>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_join_family_circle'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+            'p_invite_code': inviteCode,
+            'p_member_name': memberName,
+          }),
+        ),
+        FamilySnapshot.fromJson,
+      );
+    }
+    return _execute<FamilySnapshot>(
+      () => _client.post(
+        _endpoint(state.serverUrl, '/api/family/circle/join.php'),
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Authorization': 'Bearer ${state.deviceToken}',
+        },
+        body: jsonEncode({
+          'device_id': state.deviceId,
+          'invite_code': inviteCode,
+          'member_name': memberName,
+        }),
+      ),
+      FamilySnapshot.fromJson,
+    );
+  }
+
+  Future<ApiResponse<void>> leaveFamilyCircle(DeviceTrackerState state) async {
+    if (state.isSupabaseMode) {
+      return _execute<void>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_leave_family_circle'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+          }),
+        ),
+        (_) {},
+      );
+    }
+    return _execute<void>(
+      () => _client.post(
+        _endpoint(state.serverUrl, '/api/family/circle/leave.php'),
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Authorization': 'Bearer ${state.deviceToken}',
+        },
+        body: jsonEncode({'device_id': state.deviceId}),
+      ),
+      (_) {},
+    );
+  }
+
+  Future<ApiResponse<String>> regenerateCircleInvite(DeviceTrackerState state) async {
+    if (state.isSupabaseMode) {
+      return _execute<String>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_regenerate_circle_invite'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+          }),
+        ),
+        (json) => (json['invite_code'] as String?) ?? '',
+      );
+    }
+    return _execute<String>(
+      () => _client.post(
+        _endpoint(state.serverUrl, '/api/family/circle/regenerate-code.php'),
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Authorization': 'Bearer ${state.deviceToken}',
+        },
+        body: jsonEncode({'device_id': state.deviceId}),
+      ),
+      (json) => (json['invite_code'] as String?) ?? '',
+    );
+  }
+
+  Future<ApiResponse<FamilySnapshot>> fetchCircleSnapshot(
+    DeviceTrackerState state, {
+    String? eventsSinceIso,
+  }) async {
+    if (state.isSupabaseMode) {
+      return _execute<FamilySnapshot>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_get_circle_snapshot'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+            'p_events_since': eventsSinceIso,
+          }),
+        ),
+        FamilySnapshot.fromJson,
+      );
+    }
+    final query = <String, String>{'device_id': state.deviceId};
+    if (eventsSinceIso != null && eventsSinceIso.isNotEmpty) {
+      query['events_since'] = eventsSinceIso;
+    }
+    return _execute<FamilySnapshot>(
+      () => _client.get(
+        _endpoint(state.serverUrl, '/api/family/circle/snapshot.php', query),
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': 'Bearer ${state.deviceToken}',
+          'X-Device-Id': state.deviceId,
+        },
+      ),
+      FamilySnapshot.fromJson,
+    );
+  }
+
+  Future<ApiResponse<FamilySnapshot>> upsertSavedPlace({
+    required DeviceTrackerState state,
+    String? placeId,
+    required String name,
+    required PlaceCategory category,
+    required double latitude,
+    required double longitude,
+    required int radiusMeters,
+    required bool isHome,
+    required bool notifyOnEnter,
+    required bool notifyOnExit,
+  }) async {
+    if (state.isSupabaseMode) {
+      return _execute<FamilySnapshot>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_upsert_saved_place'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+            'p_place_id': (placeId != null && placeId.isNotEmpty) ? placeId : null,
+            'p_name': name,
+            'p_category': category.toWire(),
+            'p_latitude': latitude,
+            'p_longitude': longitude,
+            'p_radius_meters': radiusMeters,
+            'p_is_home': isHome,
+            'p_notify_on_enter': notifyOnEnter,
+            'p_notify_on_exit': notifyOnExit,
+          }),
+        ),
+        FamilySnapshot.fromJson,
+      );
+    }
+    return _execute<FamilySnapshot>(
+      () => _client.post(
+        _endpoint(state.serverUrl, '/api/family/places/upsert.php'),
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Authorization': 'Bearer ${state.deviceToken}',
+        },
+        body: jsonEncode({
+          'device_id': state.deviceId,
+          if (placeId != null && placeId.isNotEmpty) 'place_id': placeId,
+          'name': name,
+          'category': category.toWire(),
+          'latitude': latitude,
+          'longitude': longitude,
+          'radius_meters': radiusMeters,
+          'is_home': isHome,
+          'notify_on_enter': notifyOnEnter,
+          'notify_on_exit': notifyOnExit,
+        }),
+      ),
+      FamilySnapshot.fromJson,
+    );
+  }
+
+  Future<ApiResponse<FamilySnapshot>> deleteSavedPlace({
+    required DeviceTrackerState state,
+    required String placeId,
+  }) async {
+    if (state.isSupabaseMode) {
+      return _execute<FamilySnapshot>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_delete_saved_place'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+            'p_place_id': placeId,
+          }),
+        ),
+        FamilySnapshot.fromJson,
+      );
+    }
+    return _execute<FamilySnapshot>(
+      () => _client.post(
+        _endpoint(state.serverUrl, '/api/family/places/delete.php'),
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Authorization': 'Bearer ${state.deviceToken}',
+        },
+        body: jsonEncode({
+          'device_id': state.deviceId,
+          'place_id': placeId,
+        }),
+      ),
+      FamilySnapshot.fromJson,
+    );
+  }
+
+  Future<ApiResponse<void>> deleteLocationForBackend(DeviceTrackerState state) async {
+    if (state.isSupabaseMode) {
+      return _execute<void>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_delete_device_location'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+          }),
+        ),
+        (_) {},
+      );
+    }
+    return deleteStoredLocation(
+      serverUrl: state.serverUrl,
+      deviceId: state.deviceId,
+      deviceToken: state.deviceToken,
+    );
+  }
+
+  Future<ApiResponse<void>> unregisterForBackend(DeviceTrackerState state) async {
+    if (state.isSupabaseMode) {
+      return _execute<void>(
+        () => _client.post(
+          _supabaseRpc(state.supabaseUrl, 'rpc_unregister_device'),
+          headers: _supabaseHeaders(state.supabaseAnonKey),
+          body: jsonEncode({
+            'p_device_id': state.deviceId,
+            'p_device_token': state.deviceToken,
+          }),
+        ),
+        (_) {},
+      );
+    }
+    return unregisterDevice(
+      serverUrl: state.serverUrl,
+      deviceId: state.deviceId,
+      deviceToken: state.deviceToken,
     );
   }
 

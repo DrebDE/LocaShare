@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
@@ -94,6 +95,52 @@ class MainActivity : FlutterActivity() {
                 DeviceStore.setServerUrl(this, serverUrl)
                 result.success(buildFullStatePayload())
             }
+            "setBackendConfig" -> {
+                val mode = call.argument<String>("backendMode") ?: "php"
+                val serverUrl = call.argument<String>("serverUrl") ?: ""
+                val supabaseUrl = call.argument<String>("supabaseUrl") ?: ""
+                val supabaseAnonKey = call.argument<String>("supabaseAnonKey") ?: ""
+                DeviceStore.setBackendConfig(this, mode, serverUrl, supabaseUrl, supabaseAnonKey)
+                result.success(buildFullStatePayload())
+            }
+            "setSmartHomeMode" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: true
+                DeviceStore.setSmartHomeMode(this, enabled)
+                if (DeviceStore.getSnapshot(this).isSharing) {
+                    val reconf = Intent(this, LocationSharingService::class.java).apply {
+                        action = LocationSharingService.ACTION_RECONFIGURE_MODE
+                    }
+                    runCatching { startService(reconf) }
+                }
+                result.success(buildFullStatePayload())
+            }
+            "setCircleInfo" -> {
+                val circleId = call.argument<String>("circleId") ?: ""
+                val circleName = call.argument<String>("circleName") ?: ""
+                val memberName = call.argument<String>("memberName") ?: ""
+                DeviceStore.setCircleInfo(this, circleId, circleName, memberName)
+                result.success(buildFullStatePayload())
+            }
+            "setSavedPlaces" -> {
+                val placesJson = call.argument<String>("placesJson") ?: "[]"
+                DeviceStore.setSavedPlacesJson(this, placesJson)
+                if (DeviceStore.getSnapshot(this).isSharing) {
+                    val reconf = Intent(this, LocationSharingService::class.java).apply {
+                        action = LocationSharingService.ACTION_RECONFIGURE_MODE
+                    }
+                    runCatching { startService(reconf) }
+                }
+                result.success(buildFullStatePayload())
+            }
+            "syncFamilyAlertsNow" -> {
+                if (DeviceStore.getSnapshot(this).isSharing) {
+                    val syncIntent = Intent(this, LocationSharingService::class.java).apply {
+                        action = LocationSharingService.ACTION_SYNC_ALERTS
+                    }
+                    runCatching { startService(syncIntent) }
+                }
+                result.success(buildFullStatePayload())
+            }
             "setIntervalMs" -> {
                 val ms = call.argument<Number>("intervalMs")?.toLong() ?: 30_000L
                 DeviceStore.setIntervalMs(this, ms)
@@ -163,7 +210,46 @@ class MainActivity : FlutterActivity() {
                 DeviceStore.clearRegistration(this)
                 result.success(buildFullStatePayload())
             }
+            "getCurrentLocation" -> {
+                result.success(readBestCachedLocation())
+            }
             else -> result.notImplemented()
+        }
+    }
+
+    private fun readBestCachedLocation(): Map<String, Any?> {
+        val snap = DeviceStore.getSnapshot(this)
+        if (!hasLocationPermission()) {
+            if (snap.lastLatitude != null && snap.lastLongitude != null) {
+                return mapOf("latitude" to snap.lastLatitude, "longitude" to snap.lastLongitude)
+            }
+            return emptyMap()
+        }
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        var best: Location? = null
+        if (lm != null) {
+            val providers = listOfNotNull(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) LocationManager.FUSED_PROVIDER else null,
+                LocationManager.GPS_PROVIDER,
+                LocationManager.NETWORK_PROVIDER
+            )
+            for (p in providers) {
+                val loc = runCatching { lm.getLastKnownLocation(p) }.getOrNull() ?: continue
+                if (best == null || loc.time > best.time) {
+                    best = loc
+                }
+            }
+        }
+        return if (best != null) {
+            mapOf(
+                "latitude" to best.latitude,
+                "longitude" to best.longitude,
+                "accuracy" to best.accuracy.toDouble()
+            )
+        } else if (snap.lastLatitude != null && snap.lastLongitude != null) {
+            mapOf("latitude" to snap.lastLatitude, "longitude" to snap.lastLongitude)
+        } else {
+            emptyMap()
         }
     }
 
@@ -179,11 +265,6 @@ class MainActivity : FlutterActivity() {
         }
         if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             toRequest.add(Manifest.permission.ACCESS_COARSE_LOCATION)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            toRequest.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
         if (toRequest.isEmpty()) {
@@ -232,11 +313,6 @@ class MainActivity : FlutterActivity() {
     private fun permissionStatusMap(): Map<String, Any> {
         val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val notif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
         val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         val gpsOrNetEnabled = if (lm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             lm.isLocationEnabled
@@ -250,7 +326,7 @@ class MainActivity : FlutterActivity() {
             "hasLocationPermission" to (fine || coarse),
             "hasFineLocation" to fine,
             "hasCoarseLocation" to coarse,
-            "hasNotificationPermission" to notif,
+            "hasNotificationPermission" to false,
             "isLocationServiceEnabled" to gpsOrNetEnabled
         )
     }

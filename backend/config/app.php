@@ -57,6 +57,10 @@ return [
             'max_requests'   => Env::int('LOCASHARE_RATE_LIMIT_PAIR_MAX', 10),
             'window_seconds' => Env::int('LOCASHARE_RATE_LIMIT_PAIR_WINDOW', 300),
         ],
+        'circle_join' => [
+            'max_requests'   => Env::int('LOCASHARE_RATE_LIMIT_CIRCLE_JOIN_MAX', 15),
+            'window_seconds' => Env::int('LOCASHARE_RATE_LIMIT_CIRCLE_JOIN_WINDOW', 300),
+        ],
     ],
 
     // ── Status Freshness Thresholds ─────────────────────────
@@ -72,7 +76,18 @@ return [
 
     // ── Dashboard ───────────────────────────────────────────
     'dashboard' => [
-        'poll_interval_ms' => max(2000, Env::int('LOCASHARE_DASHBOARD_POLL_MS', 10000)),
+        'poll_interval_ms'    => max(2000, Env::int('LOCASHARE_DASHBOARD_POLL_MS', 10000)),
+        'default_map_provider' => (function (): string {
+            $provider = strtolower(trim((string) Env::get('LOCASHARE_MAP_DEFAULT_PROVIDER', 'esri_street')));
+            $googleKey = trim((string) Env::get('LOCASHARE_GOOGLE_MAPS_API_KEY', ''));
+            $allowed = ['esri_street', 'esri_hybrid', 'esri_satellite', 'osm', 'grid'];
+            if ($googleKey !== '') {
+                $allowed[] = 'google_roadmap';
+                $allowed[] = 'google_hybrid';
+            }
+            return in_array($provider, $allowed, true) ? $provider : 'esri_street';
+        })(),
+        'google_maps_api_key' => trim((string) Env::get('LOCASHARE_GOOGLE_MAPS_API_KEY', '')),
     ],
 
     // ── Application ─────────────────────────────────────────
@@ -82,5 +97,12 @@ return [
         'debug'    => Env::bool('LOCASHARE_APP_DEBUG', false),
         'timezone' => (string) Env::get('LOCASHARE_TIMEZONE', 'UTC'),
         'base_url' => (string) Env::get('LOCASHARE_BASE_URL', ''),
+    ],
+
+    // ── Optional Push Notifications (FCM HTTP v1) ───────────
+    'fcm' => [
+        'project_id'   => trim((string) Env::get('LOCASHARE_FCM_PROJECT_ID', '')),
+        'client_email' => trim((string) Env::get('LOCASHARE_FCM_CLIENT_EMAIL', '')),
+        'private_key'  => (string) Env::get('LOCASHARE_FCM_PRIVATE_KEY', ''),
     ],
 ];

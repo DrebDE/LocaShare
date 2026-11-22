@@ -168,6 +168,12 @@ class Database
                 device_id            INTEGER NOT NULL UNIQUE,
                 sharing_enabled      INTEGER NOT NULL DEFAULT 0,
                 status_state         TEXT NOT NULL DEFAULT 'registered',
+                presence_mode        TEXT NOT NULL DEFAULT 'unknown',
+                current_place_id     TEXT NULL,
+                current_place_name   TEXT NULL,
+                home_privacy_masked  INTEGER NOT NULL DEFAULT 0,
+                smart_home_mode      INTEGER NOT NULL DEFAULT 1,
+                speed_mps            REAL NULL,
                 battery_percentage   INTEGER NULL,
                 is_charging          INTEGER NULL,
                 network_status       TEXT NULL DEFAULT 'unknown',
@@ -216,10 +222,107 @@ class Database
             )",
             "CREATE INDEX IF NOT EXISTS idx_pairings_session_active ON dashboard_device_pairings (session_id, revoked_at)",
             "CREATE INDEX IF NOT EXISTS idx_pairings_device_active ON dashboard_device_pairings (device_id, revoked_at)",
+            "CREATE TABLE IF NOT EXISTS family_circles (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                circle_id            TEXT NOT NULL UNIQUE,
+                name                 TEXT NOT NULL,
+                invite_code          TEXT NOT NULL,
+                invite_code_hash     TEXT NOT NULL UNIQUE,
+                created_by_device_id INTEGER NOT NULL,
+                created_at           TEXT NOT NULL,
+                updated_at           TEXT NOT NULL,
+                FOREIGN KEY (created_by_device_id) REFERENCES devices(id) ON DELETE CASCADE
+            )",
+            "CREATE TABLE IF NOT EXISTS circle_members (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                circle_id    INTEGER NOT NULL,
+                device_id    INTEGER NOT NULL,
+                member_name  TEXT NOT NULL,
+                role         TEXT NOT NULL DEFAULT 'member',
+                avatar_color TEXT NOT NULL DEFAULT '#0EA5E9',
+                joined_at    TEXT NOT NULL,
+                left_at      TEXT NULL,
+                UNIQUE (circle_id, device_id),
+                FOREIGN KEY (circle_id) REFERENCES family_circles(id) ON DELETE CASCADE,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_circle_members_active ON circle_members (device_id, left_at)",
+            "CREATE INDEX IF NOT EXISTS idx_circle_members_circle ON circle_members (circle_id, left_at)",
+            "CREATE TABLE IF NOT EXISTS saved_places (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                place_id             TEXT NOT NULL UNIQUE,
+                circle_id            INTEGER NOT NULL,
+                name                 TEXT NOT NULL,
+                category             TEXT NOT NULL DEFAULT 'custom',
+                latitude             REAL NOT NULL,
+                longitude            REAL NOT NULL,
+                radius_meters        INTEGER NOT NULL DEFAULT 150,
+                is_home              INTEGER NOT NULL DEFAULT 0,
+                notify_on_enter      INTEGER NOT NULL DEFAULT 1,
+                notify_on_exit       INTEGER NOT NULL DEFAULT 1,
+                created_by_device_id INTEGER NULL,
+                deleted_at           TEXT NULL,
+                created_at           TEXT NOT NULL,
+                updated_at           TEXT NOT NULL,
+                FOREIGN KEY (circle_id) REFERENCES family_circles(id) ON DELETE CASCADE,
+                FOREIGN KEY (created_by_device_id) REFERENCES devices(id) ON DELETE SET NULL
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_saved_places_circle ON saved_places (circle_id, deleted_at)",
+            "CREATE TABLE IF NOT EXISTS place_events (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id       TEXT NOT NULL UNIQUE,
+                circle_id      INTEGER NOT NULL,
+                device_id      INTEGER NOT NULL,
+                member_name    TEXT NOT NULL,
+                place_id       TEXT NOT NULL,
+                place_name     TEXT NOT NULL,
+                place_category TEXT NOT NULL DEFAULT 'custom',
+                event_type     TEXT NOT NULL,
+                occurred_at    TEXT NOT NULL,
+                created_at     TEXT NOT NULL,
+                FOREIGN KEY (circle_id) REFERENCES family_circles(id) ON DELETE CASCADE,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_place_events_circle_time ON place_events (circle_id, occurred_at)",
+            "CREATE TABLE IF NOT EXISTS push_tokens (
+                device_id  INTEGER PRIMARY KEY,
+                fcm_token  TEXT NOT NULL,
+                platform   TEXT NOT NULL DEFAULT 'android',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            )",
+            "CREATE TABLE IF NOT EXISTS dashboard_circle_pairings (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                circle_id  INTEGER NOT NULL,
+                paired_at  TEXT NOT NULL,
+                revoked_at TEXT NULL,
+                UNIQUE (session_id, circle_id),
+                FOREIGN KEY (session_id) REFERENCES dashboard_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (circle_id) REFERENCES family_circles(id) ON DELETE CASCADE
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_dash_circle_session ON dashboard_circle_pairings (session_id, revoked_at)",
         ];
 
         foreach ($statements as $sql) {
             $pdo->exec($sql);
+        }
+
+        // Non-destructive migration for existing SQLite databases missing new device_status columns
+        $cols = $pdo->query("PRAGMA table_info(device_status)")->fetchAll();
+        $existingCols = array_column($cols, 'name');
+        $migrations = [
+            'presence_mode'       => "ALTER TABLE device_status ADD COLUMN presence_mode TEXT NOT NULL DEFAULT 'unknown'",
+            'current_place_id'    => "ALTER TABLE device_status ADD COLUMN current_place_id TEXT NULL",
+            'current_place_name'  => "ALTER TABLE device_status ADD COLUMN current_place_name TEXT NULL",
+            'home_privacy_masked' => "ALTER TABLE device_status ADD COLUMN home_privacy_masked INTEGER NOT NULL DEFAULT 0",
+            'smart_home_mode'     => "ALTER TABLE device_status ADD COLUMN smart_home_mode INTEGER NOT NULL DEFAULT 1",
+            'speed_mps'           => "ALTER TABLE device_status ADD COLUMN speed_mps REAL NULL",
+        ];
+        foreach ($migrations as $col => $alterSql) {
+            if (!in_array($col, $existingCols, true)) {
+                $pdo->exec($alterSql);
+            }
         }
     }
 

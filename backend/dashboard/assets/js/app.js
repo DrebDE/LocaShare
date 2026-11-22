@@ -13,6 +13,13 @@
         apiBase: '../api',
         thresholds: { online_threshold_seconds: 90, location_stale_seconds: 180 },
         devices: [],
+        pairedDevices: [],
+        familyCircles: [],
+        activeCircle: null,
+        places: [],
+        events: [],
+        lastSeenEventId: null,
+        desktopAlertsEnabled: false,
         revokedPairings: [],
         selectedDeviceId: null,
         serverOutage: false,
@@ -45,12 +52,47 @@
         detailCoordinates: document.getElementById('detail-coordinates'),
         detailAccuracy: document.getElementById('detail-accuracy'),
         detailTelemetry: document.getElementById('detail-telemetry'),
+        detailPresence: document.getElementById('detail-presence'),
         btnCenterSelected: document.getElementById('btn-center-selected'),
         btnDeleteLocation: document.getElementById('btn-delete-location'),
         btnUnpairDevice: document.getElementById('btn-unpair-device'),
         btnRefreshNow: document.getElementById('btn-refresh-now'),
+        btnOpenCircleModal: document.getElementById('btn-open-circle-modal'),
+        btnJoinCircleInline: document.getElementById('btn-join-circle-inline'),
         btnOpenPairModal: document.getElementById('btn-open-pair-modal'),
         btnEmptyPair: document.getElementById('btn-empty-pair'),
+        familyCircleTitle: document.getElementById('family-circle-title'),
+        familyCircleSubtitle: document.getElementById('family-circle-subtitle'),
+        familyCircleActive: document.getElementById('family-circle-active'),
+        familyInviteCode: document.getElementById('family-invite-code'),
+        btnDesktopAlerts: document.getElementById('btn-desktop-alerts'),
+        btnLeaveCircle: document.getElementById('btn-leave-circle'),
+        btnAddPlace: document.getElementById('btn-add-place'),
+        savedPlacesList: document.getElementById('saved-places-list'),
+        placeEventsList: document.getElementById('place-events-list'),
+        circleModalBackdrop: document.getElementById('circle-modal-backdrop'),
+        btnCloseCircleModal: document.getElementById('btn-close-circle-modal'),
+        circleJoinForm: document.getElementById('circle-join-form'),
+        circleInviteInput: document.getElementById('circle-invite-input'),
+        circleErrorBox: document.getElementById('circle-error-box'),
+        btnSubmitCircleJoin: document.getElementById('btn-submit-circle-join'),
+        placeModalBackdrop: document.getElementById('place-modal-backdrop'),
+        placeModalTitle: document.getElementById('place-modal-title'),
+        btnClosePlaceModal: document.getElementById('btn-close-place-modal'),
+        placeForm: document.getElementById('place-form'),
+        placeIdInput: document.getElementById('place-id-input'),
+        placeNameInput: document.getElementById('place-name-input'),
+        placeCategorySelect: document.getElementById('place-category-select'),
+        placeLatInput: document.getElementById('place-lat-input'),
+        placeLngInput: document.getElementById('place-lng-input'),
+        placeRadiusInput: document.getElementById('place-radius-input'),
+        placeRadiusLabel: document.getElementById('place-radius-label'),
+        placeNotifyEnter: document.getElementById('place-notify-enter'),
+        placeNotifyExit: document.getElementById('place-notify-exit'),
+        placeErrorBox: document.getElementById('place-error-box'),
+        btnPickPlaceOnMap: document.getElementById('btn-pick-place-on-map'),
+        btnUseSelectedDeviceCoords: document.getElementById('btn-use-selected-device-coords'),
+        btnSavePlace: document.getElementById('btn-save-place'),
         pairModalBackdrop: document.getElementById('pair-modal-backdrop'),
         btnClosePairModal: document.getElementById('btn-close-pair-modal'),
         pairForm: document.getElementById('pair-form'),
@@ -72,8 +114,10 @@
         btnZoomOut: document.getElementById('btn-zoom-out'),
         btnFitAll: document.getElementById('btn-fit-all'),
         btnCenterActive: document.getElementById('btn-center-active'),
-        chkOsmTiles: document.getElementById('chk-osm-tiles'),
-        tileModeBadge: document.getElementById('tile-mode-badge')
+        googleMapStage: document.getElementById('google-map-stage'),
+        mapProviderSelect: document.getElementById('map-provider-select'),
+        tileModeBadge: document.getElementById('tile-mode-badge'),
+        mapAttribution: document.getElementById('map-attribution')
     };
 
     var map = new window.LocaShareMap({
@@ -84,6 +128,137 @@
             selectDevice(deviceId, shouldCenter);
         }
     });
+    var MAP_PROVIDERS_META = {
+        esri_street: {
+            badge: 'Esri World Street Active (services.arcgisonline.com)',
+            linkText: 'Tiles © Esri',
+            linkHref: 'https://www.esri.com/',
+            sourceDetail: ' — Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, METI, GIS User Community',
+            notice: 'Only visible map tile indices (z/y/x) are requested from services.arcgisonline.com; exact device coordinates and tokens stay on your LocaShare server. Select Local Privacy Grid for 0 external requests.'
+        },
+        esri_hybrid: {
+            badge: 'Esri Satellite + Labels Active (services.arcgisonline.com)',
+            linkText: 'Sources: Esri, Maxar, Earthstar Geographics',
+            linkHref: 'https://www.esri.com/',
+            sourceDetail: ', and the GIS User Community',
+            notice: 'Only visible map tile indices (z/y/x) are requested from services.arcgisonline.com; exact device coordinates and tokens stay on your LocaShare server. Select Local Privacy Grid for 0 external requests.'
+        },
+        esri_satellite: {
+            badge: 'Esri Satellite Active (services.arcgisonline.com)',
+            linkText: 'Sources: Esri, Maxar, Earthstar Geographics',
+            linkHref: 'https://www.esri.com/',
+            sourceDetail: ', and the GIS User Community',
+            notice: 'Only visible map tile indices (z/y/x) are requested from services.arcgisonline.com; exact device coordinates and tokens stay on your LocaShare server. Select Local Privacy Grid for 0 external requests.'
+        },
+        osm: {
+            badge: 'OpenStreetMap Tiles Active (tile.openstreetmap.org)',
+            linkText: '© OpenStreetMap contributors',
+            linkHref: 'https://www.openstreetmap.org/copyright',
+            sourceDetail: '',
+            notice: 'Only visible map tile indices (z/x/y) are requested from tile.openstreetmap.org; exact device coordinates and tokens stay on your LocaShare server. Select Local Privacy Grid for 0 external requests.'
+        },
+        grid: {
+            badge: 'Local Privacy Grid (0 external requests)',
+            linkText: '',
+            linkHref: '',
+            sourceDetail: '',
+            notice: 'Local Privacy Grid active: all map graticules, accuracy circles, and device pins render locally in your browser with zero external requests.'
+        },
+        google_roadmap: {
+            badge: 'Google Maps Roadmap Active (maps.googleapis.com)',
+            linkText: 'Google Maps',
+            linkHref: 'https://maps.google.com/',
+            sourceDetail: ' (built-in Google attribution shown on map)',
+            notice: 'Google Maps JS SDK loads tiles and renders viewport/marker coordinates in your browser via maps.googleapis.com. Switch to Esri or Local Privacy Grid to keep exact coordinates off third-party map providers.'
+        },
+        google_hybrid: {
+            badge: 'Google Maps Satellite + Labels Active (maps.googleapis.com)',
+            linkText: 'Google Maps',
+            linkHref: 'https://maps.google.com/',
+            sourceDetail: ' (built-in Google attribution shown on map)',
+            notice: 'Google Maps JS SDK loads tiles and renders viewport/marker coordinates in your browser via maps.googleapis.com. Switch to Esri or Local Privacy Grid to keep exact coordinates off third-party map providers.'
+        }
+    };
+
+    function hasSelectOption(selectEl, val) {
+        if (!selectEl || !selectEl.options) {
+            return false;
+        }
+        for (var i = 0; i < selectEl.options.length; i++) {
+            if (selectEl.options[i].value === val) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function renderMapAttribution(providerId) {
+        var meta = MAP_PROVIDERS_META[providerId] || MAP_PROVIDERS_META.esri_street;
+        if (els.tileModeBadge) {
+            els.tileModeBadge.textContent = meta.badge;
+        }
+        if (!els.mapAttribution) {
+            return;
+        }
+        els.mapAttribution.textContent = '';
+        if (meta.linkText) {
+            els.mapAttribution.appendChild(document.createTextNode('Map data: '));
+            var link = document.createElement('a');
+            link.href = meta.linkHref;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = meta.linkText;
+            els.mapAttribution.appendChild(link);
+            if (meta.sourceDetail) {
+                els.mapAttribution.appendChild(document.createTextNode(meta.sourceDetail));
+            }
+            els.mapAttribution.appendChild(document.createTextNode(' · '));
+        }
+        var strong = document.createElement('strong');
+        strong.textContent = 'Privacy notice: ';
+        els.mapAttribution.appendChild(strong);
+        els.mapAttribution.appendChild(document.createTextNode(meta.notice));
+    }
+
+    function applyMapProvider(providerId, persistChoice) {
+        var resolved = MAP_PROVIDERS_META[providerId] ? providerId : 'esri_street';
+        if (els.mapProviderSelect && els.mapProviderSelect.options && !hasSelectOption(els.mapProviderSelect, resolved)) {
+            resolved = 'esri_street';
+        }
+        if (els.mapProviderSelect) {
+            els.mapProviderSelect.value = resolved;
+        }
+        map.setProvider(resolved);
+        renderMapAttribution(resolved);
+        if (persistChoice) {
+            try {
+                if (window.localStorage) {
+                    window.localStorage.setItem('locashare_map_provider', resolved);
+                }
+            } catch (e) {
+                // Ignore restricted storage mode
+            }
+        }
+    }
+
+    if (els.googleMapStage) {
+        map.googleStage = els.googleMapStage;
+    }
+    map.onMapAuthError = function (errorMsg) {
+        applyMapProvider('esri_street', false);
+        if (els.tileModeBadge) {
+            els.tileModeBadge.textContent = (errorMsg || 'Google Maps unavailable') + ' — switched to Esri Street';
+        }
+    };
+
+    var savedProvider = '';
+    try {
+        savedProvider = window.localStorage ? (window.localStorage.getItem('locashare_map_provider') || '') : '';
+    } catch (e) {
+        savedProvider = '';
+    }
+    var initialProvider = savedProvider || (els.mapProviderSelect && els.mapProviderSelect.value) || 'esri_street';
+    applyMapProvider(initialProvider, false);
 
     function formatRelativeSeconds(seconds) {
         if (typeof seconds !== 'number' || isNaN(seconds) || seconds < 0) {
@@ -302,6 +477,21 @@
             badgesRow.appendChild(locBadge);
             badgesRow.appendChild(appStateBadge);
 
+            if (dev.presence_mode && dev.presence_mode !== 'unknown') {
+                var presBadge = document.createElement('span');
+                if (dev.presence_mode === 'at_home') {
+                    presBadge.className = 'badge badge-at-home';
+                    presBadge.textContent = dev.home_privacy_masked ? 'At Home (Privacy Saver)' : 'At Home';
+                } else if (dev.presence_mode === 'at_place' && dev.current_place_name) {
+                    presBadge.className = 'badge badge-at-place';
+                    presBadge.textContent = 'At ' + dev.current_place_name;
+                } else {
+                    presBadge.className = 'badge badge-away';
+                    presBadge.textContent = 'Out of House · Live';
+                }
+                badgesRow.appendChild(presBadge);
+            }
+
             var metaLines = document.createElement('div');
             metaLines.className = 'device-meta-lines';
             var coordText = dev.has_location && dev.location
@@ -404,6 +594,23 @@
         }
         els.detailTelemetry.textContent = netParts.length > 0 ? netParts.join(' · ') : 'Not reported';
 
+        if (els.detailPresence) {
+            if (selected.presence_mode === 'at_home') {
+                els.detailPresence.textContent = selected.home_privacy_masked
+                    ? 'At Home (Privacy & Battery Saver)'
+                    : 'At Home';
+            } else if (selected.presence_mode === 'at_place' && selected.current_place_name) {
+                els.detailPresence.textContent = 'At ' + selected.current_place_name;
+            } else if (selected.presence_mode === 'away') {
+                els.detailPresence.textContent = 'Away from Home (Live GPS)';
+            } else {
+                els.detailPresence.textContent = '—';
+            }
+        }
+        var isCircleOnly = Boolean(selected._circleOnly);
+        els.btnDeleteLocation.classList.toggle('hidden', isCircleOnly);
+        els.btnUnpairDevice.classList.toggle('hidden', isCircleOnly);
+
         // Map overlay message if selected device has no location fix yet
         var anyWithLocation = state.devices.some(function (d) { return d.has_location; });
         if (!anyWithLocation) {
@@ -414,16 +621,190 @@
         }
     }
 
+    function mergeAllVisibleDevices() {
+        var byId = {};
+        var merged = [];
+        (state.pairedDevices || []).forEach(function (d) {
+            byId[d.device_id] = d;
+            merged.push(d);
+        });
+        (state.familyCircles || []).forEach(function (c) {
+            (c.members || []).forEach(function (m) {
+                if (byId[m.device_id]) {
+                    byId[m.device_id].member_name = m.member_name;
+                    byId[m.device_id].avatar_color = m.avatar_color;
+                } else {
+                    var copy = Object.assign({}, m, { _circleOnly: true });
+                    byId[m.device_id] = copy;
+                    merged.push(copy);
+                }
+            });
+        });
+        state.devices = merged;
+    }
+
+    function renderFamilyPanel() {
+        if (!els.familyCircleActive) return;
+        var circleBundle = state.activeCircle;
+        if (!circleBundle || !circleBundle.circle) {
+            els.familyCircleTitle.textContent = 'Family Circle';
+            els.familyCircleSubtitle.classList.remove('hidden');
+            els.familyCircleActive.classList.add('hidden');
+            return;
+        }
+
+        els.familyCircleTitle.textContent = circleBundle.circle.name || 'Family Circle';
+        els.familyCircleSubtitle.classList.add('hidden');
+        els.familyCircleActive.classList.remove('hidden');
+        els.familyInviteCode.textContent = circleBundle.circle.invite_code || '—';
+        if (els.btnDesktopAlerts) {
+            els.btnDesktopAlerts.textContent = state.desktopAlertsEnabled ? 'Alerts: On' : 'Alerts: Off';
+        }
+
+        // Saved Places list
+        els.savedPlacesList.textContent = '';
+        var places = state.places || [];
+        if (places.length === 0) {
+            var emptyPl = document.createElement('li');
+            emptyPl.className = 'place-item';
+            var emptySub = document.createElement('span');
+            emptySub.className = 'place-item-sub';
+            emptySub.textContent = 'No places yet. Add Home first so At-Home privacy & out-of-house alerts work automatically.';
+            emptyPl.appendChild(emptySub);
+            els.savedPlacesList.appendChild(emptyPl);
+        } else {
+            places.forEach(function (pl) {
+                var li = document.createElement('li');
+                li.className = 'place-item';
+
+                var meta = document.createElement('div');
+                meta.className = 'place-item-meta';
+                var title = document.createElement('span');
+                title.className = 'place-item-title';
+                title.textContent = (pl.is_home ? '🏠 ' : '') + pl.name;
+                var sub = document.createElement('span');
+                sub.className = 'place-item-sub';
+                sub.textContent = (pl.category || 'custom').toUpperCase() + ' · ' + pl.radius_meters + 'm';
+                meta.appendChild(title);
+                meta.appendChild(sub);
+
+                var acts = document.createElement('div');
+                acts.className = 'place-item-actions';
+
+                var focusBtn = document.createElement('button');
+                focusBtn.type = 'button';
+                focusBtn.className = 'btn btn-secondary btn-sm';
+                focusBtn.textContent = 'Map';
+                focusBtn.addEventListener('click', function () {
+                    map.centerOnCoords(pl.latitude, pl.longitude, 16);
+                });
+
+                var editBtn = document.createElement('button');
+                editBtn.type = 'button';
+                editBtn.className = 'btn btn-secondary btn-sm';
+                editBtn.textContent = 'Edit';
+                editBtn.addEventListener('click', function () {
+                    openPlaceModal(pl);
+                });
+
+                var delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'btn btn-danger-outline btn-sm';
+                delBtn.textContent = '×';
+                delBtn.addEventListener('click', function () {
+                    deleteSavedPlace(pl.place_id);
+                });
+
+                acts.appendChild(focusBtn);
+                acts.appendChild(editBtn);
+                acts.appendChild(delBtn);
+
+                li.appendChild(meta);
+                li.appendChild(acts);
+                els.savedPlacesList.appendChild(li);
+            });
+        }
+
+        // Place Events feed
+        els.placeEventsList.textContent = '';
+        var events = state.events || [];
+        if (events.length === 0) {
+            var emptyEv = document.createElement('li');
+            emptyEv.className = 'event-item';
+            var evSub = document.createElement('span');
+            evSub.className = 'event-item-time';
+            evSub.textContent = 'No arrive/leave events recorded yet.';
+            emptyEv.appendChild(evSub);
+            els.placeEventsList.appendChild(emptyEv);
+        } else {
+            events.slice(0, 12).forEach(function (ev) {
+                var li = document.createElement('li');
+                li.className = 'event-item';
+                var verb = ev.event_type === 'exited' ? 'left' : 'arrived at';
+                var msg = document.createElement('span');
+                msg.textContent = (ev.member_name || 'Member') + ' ' + verb + ' ' + (ev.place_name || 'Place');
+                var tm = document.createElement('span');
+                tm.className = 'event-item-time';
+                tm.textContent = ev.occurred_at ? new Date(ev.occurred_at).toLocaleTimeString() : '';
+                li.appendChild(msg);
+                li.appendChild(tm);
+                els.placeEventsList.appendChild(li);
+            });
+        }
+    }
+
     function renderAll() {
+        mergeAllVisibleDevices();
         renderRevokedBanners();
         renderDeviceList();
         renderSelectedDeviceDetails();
+        renderFamilyPanel();
+        map.setPlaces(state.places);
         map.setDevices(state.devices, state.selectedDeviceId);
+    }
+
+    function applyFamilyStateData(data) {
+        var circles = Array.isArray(data.circles) ? data.circles : [];
+        state.familyCircles = circles;
+        state.activeCircle = circles.length > 0 ? circles[0] : null;
+        state.places = state.activeCircle && Array.isArray(state.activeCircle.places)
+            ? state.activeCircle.places
+            : [];
+        var incomingEvents = state.activeCircle && Array.isArray(state.activeCircle.events)
+            ? state.activeCircle.events
+            : [];
+
+        if (incomingEvents.length > 0) {
+            var newest = incomingEvents[0];
+            if (state.lastSeenEventId && newest.event_id !== state.lastSeenEventId && state.desktopAlertsEnabled && 'Notification' in window && window.Notification.permission === 'granted') {
+                var verb = newest.event_type === 'exited' ? 'left' : 'arrived at';
+                new window.Notification('LocaShare Family Alert', {
+                    body: (newest.member_name || 'Family member') + ' ' + verb + ' ' + (newest.place_name || 'Place')
+                });
+            }
+            state.lastSeenEventId = newest.event_id;
+        }
+        state.events = incomingEvents;
+        renderAll();
     }
 
     function applySessionData(data) {
         if (data.csrf_token) {
             state.csrfToken = data.csrf_token;
+        }
+        if (data.map_config) {
+            map.setGoogleMapsApiKey(data.map_config.google_maps_api_key || '');
+            var stored = '';
+            try {
+                stored = window.localStorage ? (window.localStorage.getItem('locashare_map_provider') || '') : '';
+            } catch (e) {
+                stored = '';
+            }
+            if (!stored && data.map_config.default_provider) {
+                applyMapProvider(data.map_config.default_provider, false);
+            } else {
+                applyMapProvider((els.mapProviderSelect && els.mapProviderSelect.value) || 'esri_street', false);
+            }
         }
         if (typeof data.poll_interval_ms === 'number' && data.poll_interval_ms >= 2000) {
             state.pollIntervalMs = data.poll_interval_ms;
@@ -431,7 +812,7 @@
         if (data.thresholds) {
             state.thresholds = data.thresholds;
         }
-        state.devices = Array.isArray(data.devices) ? data.devices : [];
+        state.pairedDevices = Array.isArray(data.devices) ? data.devices : [];
         state.revokedPairings = Array.isArray(data.revoked_pairings) ? data.revoked_pairings : [];
 
         renderAll();
@@ -450,13 +831,29 @@
             }
             setServerOutage(false);
             applySessionData(res.data);
+            return pollFamilyState();
         }).catch(function () {
             setServerOutage(true, 'Unable to reach the LocaShare backend. Check your network or server status.');
         });
     }
 
+    function pollFamilyState() {
+        return apiRequest('/dashboard/family-state.php').then(function (res) {
+            if (res.ok && res.data) {
+                applyFamilyStateData(res.data);
+            }
+        }).catch(function () {
+            // Keep existing family state on transient error
+        });
+    }
+
     function pollDevices() {
-        return apiRequest('/dashboard/devices.php').then(function (res) {
+        return Promise.all([
+            apiRequest('/dashboard/devices.php'),
+            apiRequest('/dashboard/family-state.php').catch(function () { return { ok: false }; })
+        ]).then(function (results) {
+            var res = results[0];
+            var famRes = results[1];
             if (!res.ok) {
                 if (res.status === 401) {
                     return initSession();
@@ -465,6 +862,9 @@
                 return;
             }
             setServerOutage(false);
+            if (famRes && famRes.ok && famRes.data) {
+                applyFamilyStateData(famRes.data);
+            }
             applySessionData(res.data);
         }).catch(function () {
             setServerOutage(true, 'Unable to reach the LocaShare backend. Check your network or server status.');
@@ -756,15 +1156,219 @@
         }
     });
 
-    els.chkOsmTiles.addEventListener('change', function () {
-        var enabled = els.chkOsmTiles.checked;
-        map.setOsmTilesEnabled(enabled);
-        if (enabled) {
-            els.tileModeBadge.textContent = 'OpenStreetMap Tiles Active (tile.openstreetmap.org)';
-        } else {
-            els.tileModeBadge.textContent = 'Local Privacy Grid (0 external requests)';
+    if (els.mapProviderSelect) {
+        els.mapProviderSelect.addEventListener('change', function () {
+            applyMapProvider(els.mapProviderSelect.value, true);
+        });
+    }
+
+    // ── Family Circle & Saved Places Controls ────────────────────
+    function openCircleModal() {
+        if (!els.circleModalBackdrop) return;
+        els.circleErrorBox.classList.add('hidden');
+        els.circleInviteInput.value = '';
+        els.circleModalBackdrop.classList.remove('hidden');
+        els.circleInviteInput.focus();
+    }
+
+    function closeCircleModal() {
+        if (els.circleModalBackdrop) {
+            els.circleModalBackdrop.classList.add('hidden');
         }
-    });
+    }
+
+    function openPlaceModal(existingPlace) {
+        if (!els.placeModalBackdrop || !state.activeCircle || !state.activeCircle.circle) return;
+        els.placeErrorBox.classList.add('hidden');
+        if (existingPlace) {
+            els.placeModalTitle.textContent = 'Edit Saved Place';
+            els.placeIdInput.value = existingPlace.place_id || '';
+            els.placeNameInput.value = existingPlace.name || '';
+            els.placeCategorySelect.value = existingPlace.category || 'custom';
+            els.placeLatInput.value = String(existingPlace.latitude);
+            els.placeLngInput.value = String(existingPlace.longitude);
+            els.placeRadiusInput.value = String(existingPlace.radius_meters || 150);
+            els.placeRadiusLabel.textContent = String(existingPlace.radius_meters || 150);
+            els.placeNotifyEnter.checked = existingPlace.notify_on_enter !== false;
+            els.placeNotifyExit.checked = existingPlace.notify_on_exit !== false;
+        } else {
+            els.placeModalTitle.textContent = 'Add Saved Place';
+            els.placeIdInput.value = '';
+            els.placeNameInput.value = state.places.some(function (p) { return p.is_home; }) ? 'School' : 'Home';
+            els.placeCategorySelect.value = state.places.some(function (p) { return p.is_home; }) ? 'school' : 'home';
+            els.placeLatInput.value = map.centerLat.toFixed(6);
+            els.placeLngInput.value = map.centerLng.toFixed(6);
+            els.placeRadiusInput.value = '150';
+            els.placeRadiusLabel.textContent = '150';
+            els.placeNotifyEnter.checked = true;
+            els.placeNotifyExit.checked = true;
+        }
+        els.placeModalBackdrop.classList.remove('hidden');
+    }
+
+    function closePlaceModal() {
+        if (els.placeModalBackdrop) {
+            els.placeModalBackdrop.classList.add('hidden');
+        }
+    }
+
+    function deleteSavedPlace(placeId) {
+        if (!state.activeCircle || !state.activeCircle.circle) return;
+        if (!window.confirm('Delete this saved place?')) return;
+        apiRequest('/dashboard/place-delete.php', {
+            method: 'POST',
+            body: {
+                circle_id: state.activeCircle.circle.circle_id,
+                place_id: placeId,
+                csrf_token: state.csrfToken
+            }
+        }).then(function (res) {
+            if (res.ok && res.data) {
+                applyFamilyStateData(res.data);
+            }
+        });
+    }
+
+    if (els.btnOpenCircleModal) els.btnOpenCircleModal.addEventListener('click', openCircleModal);
+    if (els.btnJoinCircleInline) els.btnJoinCircleInline.addEventListener('click', openCircleModal);
+    if (els.btnCloseCircleModal) els.btnCloseCircleModal.addEventListener('click', closeCircleModal);
+
+    if (els.circleJoinForm) {
+        els.circleJoinForm.addEventListener('submit', function (e) {
+            e.preventDefault();
+            var code = els.circleInviteInput.value.trim();
+            if (!code) {
+                els.circleErrorBox.textContent = 'Enter a family invite code.';
+                els.circleErrorBox.classList.remove('hidden');
+                return;
+            }
+            els.btnSubmitCircleJoin.disabled = true;
+            apiRequest('/dashboard/family-join.php', {
+                method: 'POST',
+                body: { invite_code: code, csrf_token: state.csrfToken }
+            }).then(function (res) {
+                els.btnSubmitCircleJoin.disabled = false;
+                if (!res.ok) {
+                    els.circleErrorBox.textContent = res.data.error || 'Invite code not found.';
+                    els.circleErrorBox.classList.remove('hidden');
+                    return;
+                }
+                if (res.data.csrf_token) {
+                    state.csrfToken = res.data.csrf_token;
+                }
+                applyFamilyStateData(res.data);
+                closeCircleModal();
+                map.fitAll();
+            }).catch(function () {
+                els.btnSubmitCircleJoin.disabled = false;
+                els.circleErrorBox.textContent = 'Network error while joining family circle.';
+                els.circleErrorBox.classList.remove('hidden');
+            });
+        });
+    }
+
+    if (els.btnLeaveCircle) {
+        els.btnLeaveCircle.addEventListener('click', function () {
+            if (!state.activeCircle || !state.activeCircle.circle) return;
+            if (!window.confirm('Disconnect this dashboard from the family circle?')) return;
+            apiRequest('/dashboard/family-leave.php', {
+                method: 'POST',
+                body: {
+                    circle_id: state.activeCircle.circle.circle_id,
+                    csrf_token: state.csrfToken
+                }
+            }).then(function (res) {
+                if (res.ok && res.data) {
+                    applyFamilyStateData(res.data);
+                }
+            });
+        });
+    }
+
+    if (els.btnDesktopAlerts) {
+        els.btnDesktopAlerts.addEventListener('click', function () {
+            if (!('Notification' in window)) {
+                state.desktopAlertsEnabled = !state.desktopAlertsEnabled;
+                renderFamilyPanel();
+                return;
+            }
+            if (state.desktopAlertsEnabled) {
+                state.desktopAlertsEnabled = false;
+                renderFamilyPanel();
+                return;
+            }
+            window.Notification.requestPermission().then(function (perm) {
+                state.desktopAlertsEnabled = (perm === 'granted');
+                renderFamilyPanel();
+            });
+        });
+    }
+
+    if (els.btnAddPlace) {
+        els.btnAddPlace.addEventListener('click', function () { openPlaceModal(null); });
+    }
+    if (els.btnClosePlaceModal) {
+        els.btnClosePlaceModal.addEventListener('click', closePlaceModal);
+    }
+    if (els.placeRadiusInput) {
+        els.placeRadiusInput.addEventListener('input', function () {
+            els.placeRadiusLabel.textContent = els.placeRadiusInput.value;
+        });
+    }
+    if (els.btnUseSelectedDeviceCoords) {
+        els.btnUseSelectedDeviceCoords.addEventListener('click', function () {
+            var dev = state.devices.find(function (d) { return d.device_id === state.selectedDeviceId && d.has_location && d.location; });
+            if (dev) {
+                els.placeLatInput.value = dev.location.latitude.toFixed(6);
+                els.placeLngInput.value = dev.location.longitude.toFixed(6);
+            }
+        });
+    }
+    if (els.btnPickPlaceOnMap) {
+        els.btnPickPlaceOnMap.addEventListener('click', function () {
+            closePlaceModal();
+            els.mapOverlayMessage.classList.remove('hidden');
+            els.mapOverlayMessage.textContent = 'Click anywhere on the map to set coordinates for this Saved Place.';
+            map.enableLocationPick(function (lat, lng) {
+                els.mapOverlayMessage.classList.add('hidden');
+                els.placeModalBackdrop.classList.remove('hidden');
+                els.placeLatInput.value = lat.toFixed(6);
+                els.placeLngInput.value = lng.toFixed(6);
+            });
+        });
+    }
+    if (els.placeForm) {
+        els.placeForm.addEventListener('submit', function (e) {
+            e.preventDefault();
+            if (!state.activeCircle || !state.activeCircle.circle) return;
+            els.placeErrorBox.classList.add('hidden');
+            var category = els.placeCategorySelect.value;
+            apiRequest('/dashboard/place-upsert.php', {
+                method: 'POST',
+                body: {
+                    circle_id: state.activeCircle.circle.circle_id,
+                    place_id: els.placeIdInput.value || undefined,
+                    name: els.placeNameInput.value.trim(),
+                    category: category,
+                    is_home: category === 'home',
+                    latitude: parseFloat(els.placeLatInput.value),
+                    longitude: parseFloat(els.placeLngInput.value),
+                    radius_meters: parseInt(els.placeRadiusInput.value, 10) || 150,
+                    notify_on_enter: Boolean(els.placeNotifyEnter.checked),
+                    notify_on_exit: Boolean(els.placeNotifyExit.checked),
+                    csrf_token: state.csrfToken
+                }
+            }).then(function (res) {
+                if (!res.ok) {
+                    els.placeErrorBox.textContent = res.data.error || 'Failed to save place.';
+                    els.placeErrorBox.classList.remove('hidden');
+                    return;
+                }
+                applyFamilyStateData(res.data);
+                closePlaceModal();
+            });
+        });
+    }
 
     // Initial Session Load & Polling Loop
     initSession().then(function () {

@@ -23,6 +23,24 @@ if ($uri === '/' || $uri === '/dashboard' || $uri === '/dashboard/') {
     return true;
 }
 
+// /phone -> dashboard/phone.php (Mobile Phone Companion App)
+if ($uri === '/phone' || $uri === '/phone/' || $uri === '/dashboard/phone.php') {
+    require $backendRoot . '/dashboard/phone.php';
+    return true;
+}
+
+// /apk or /LocaShare.apk -> serve signed Android APK download with proper MIME type
+if ($uri === '/apk' || $uri === '/LocaShare.apk' || $uri === '/dashboard/assets/LocaShare.apk') {
+    $apkFile = $backendRoot . '/dashboard/assets/LocaShare.apk';
+    if (is_file($apkFile)) {
+        header('Content-Type: application/vnd.android.package-archive');
+        header('Content-Disposition: attachment; filename="LocaShare.apk"');
+        header('Content-Length: ' . filesize($apkFile));
+        readfile($apkFile);
+        return true;
+    }
+}
+
 // Serve static files in dashboard/assets or direct existing files
 $candidatePath = realpath($backendRoot . $uri);
 if ($candidatePath !== false && str_starts_with($candidatePath, realpath($backendRoot)) && is_file($candidatePath)) {

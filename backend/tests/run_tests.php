@@ -40,6 +40,8 @@ $baseEnv = array_merge(getenv(), [
     'LOCASHARE_RATE_LIMIT_REGISTER_MAX'  => '50',
     'LOCASHARE_COOKIE_SECURE'            => 'auto',
     'LOCASHARE_TIMEZONE'                 => 'UTC',
+    'LOCASHARE_MAP_DEFAULT_PROVIDER'     => 'esri_street',
+    'LOCASHARE_GOOGLE_MAPS_API_KEY'      => '',
 ]);
 
 $phpCgiBin = findPhpCgi();
@@ -487,7 +489,190 @@ try {
         assertTrue(in_array($pairUnreg['status'], [404, 410], true), 'Pairing code for unregistered device is rejected (status=' . $pairUnreg['status'] . ')');
     }
 
-    // 8. Rate limit enforcement on pairing endpoint (limit configured to 6)
+    // 8. Family Circles, Home Geofencing, Saved Places, Place Events, Privacy Masking & Dashboard Circle Isolation
+    $regMom = httpRequest('POST', '/api/device/register', ['device_name' => 'Mom Pixel']);
+    assertEquals(201, $regMom['status'], 'Register Mom device returns 201');
+    $mom = $regMom['json'];
+    $secretsToCheck[] = $mom['device_token'];
+
+    $regAlex = httpRequest('POST', '/api/device/register', ['device_name' => 'Alex Galaxy']);
+    assertEquals(201, $regAlex['status'], 'Register Alex device returns 201');
+    $alex = $regAlex['json'];
+    $secretsToCheck[] = $alex['device_token'];
+
+    $regOutsider = httpRequest('POST', '/api/device/register', ['device_name' => 'Outsider Phone']);
+    $outsider = $regOutsider['json'];
+    $secretsToCheck[] = $outsider['device_token'];
+
+    $createCircle = httpRequest('POST', '/api/family/circle/create', [
+        'device_id'   => $mom['device_id'],
+        'name'        => 'Santos Family',
+        'member_name' => 'Mom',
+    ], ['Authorization: Bearer ' . $mom['device_token']]);
+    assertEquals(201, $createCircle['status'], 'Mom creates Family Circle');
+    $inviteCode = $createCircle['json']['circle']['invite_code'] ?? '';
+    $circleId = $createCircle['json']['circle']['circle_id'] ?? '';
+    assertTrue(str_starts_with($inviteCode, 'FAM-'), 'Circle returns shareable FAM-XXXX-XXXX invite code');
+    assertTrue(str_starts_with($circleId, 'cir_'), 'Circle returns cir_ identifier');
+    $secretsToCheck[] = $inviteCode;
+
+    $joinAlex = httpRequest('POST', '/api/family/circle/join', [
+        'device_id'   => $alex['device_id'],
+        'invite_code' => $inviteCode,
+        'member_name' => 'Alex',
+    ], ['Authorization: Bearer ' . $alex['device_token']]);
+    assertEquals(200, $joinAlex['status'], 'Alex joins Family Circle via invite code');
+    assertEquals(2, count($joinAlex['json']['members'] ?? []), 'Circle snapshot lists both Mom and Alex');
+
+    // Outsider cannot create places or read Mom/Alex circle without joining
+    $outsiderCreatePlace = httpRequest('POST', '/api/family/places/upsert', [
+        'device_id' => $outsider['device_id'],
+        'name'      => 'Evil Place',
+        'category'  => 'custom',
+        'latitude'  => 14.5,
+        'longitude' => 121.0,
+    ], ['Authorization: Bearer ' . $outsider['device_token']]);
+    assertEquals(409, $outsiderCreatePlace['status'], 'Outsider not in circle cannot add saved places');
+
+    // Mom sets Home geofence + School geofence
+    $homeLat = 14.554729;
+    $homeLng = 121.024445;
+    $upsertHome = httpRequest('POST', '/api/family/places/upsert', [
+        'device_id'       => $mom['device_id'],
+        'name'            => 'Our House',
+        'category'        => 'home',
+        'is_home'         => true,
+        'latitude'        => $homeLat,
+        'longitude'       => $homeLng,
+        'radius_meters'   => 150,
+        'notify_on_enter' => true,
+        'notify_on_exit'  => true,
+    ], ['Authorization: Bearer ' . $mom['device_token']]);
+    assertEquals(200, $upsertHome['status'], 'Mom sets Home saved place');
+    $homePlace = $upsertHome['json']['places'][0] ?? [];
+    assertEquals('home', $homePlace['category'] ?? null, 'Home place category is home');
+    assertEquals(true, $homePlace['is_home'] ?? false, 'Home place marked is_home=true');
+    $homePlaceId = $homePlace['place_id'] ?? '';
+
+    $upsertSchool = httpRequest('POST', '/api/family/places/upsert', [
+        'device_id'     => $mom['device_id'],
+        'name'          => 'Science High',
+        'category'      => 'school',
+        'latitude'      => 14.565000,
+        'longitude'     => 121.035000,
+        'radius_meters' => 200,
+    ], ['Authorization: Bearer ' . $mom['device_token']]);
+    assertEquals(200, $upsertSchool['status'], 'Mom adds School saved place');
+    assertEquals(2, count($upsertSchool['json']['places'] ?? []), 'Circle now has 2 saved places (Home + School)');
+
+    // Alex reports indoor location with home_privacy_masked=true -> server snaps coordinates to Home center!
+    $alexAtHome = httpRequest('POST', '/api/location/update', [
+        'device_id'           => $alex['device_id'],
+        'latitude'            => 14.555111,
+        'longitude'           => 121.024888,
+        'accuracy'            => 18.0,
+        'recorded_at'         => gmdate('c'),
+        'battery'             => 91,
+        'presence_mode'       => 'at_home',
+        'current_place_id'    => $homePlaceId,
+        'current_place_name'  => 'Our House',
+        'home_privacy_masked' => true,
+        'smart_home_mode'     => true,
+    ], ['Authorization: Bearer ' . $alex['device_token']]);
+    assertEquals(200, $alexAtHome['status'], 'Alex uploads At-Home masked location');
+    assertEquals('at_home', $alexAtHome['json']['presence_mode'] ?? null, 'Location update confirms at_home presence');
+    assertEquals(2, count($alexAtHome['json']['places'] ?? []), 'Location update returns synced circle places');
+
+    // Mom reads circle snapshot and sees Alex snapped to Home center
+    $momSnap1 = httpRequest('GET', '/api/family/circle/snapshot?device_id=' . urlencode($mom['device_id']), null, [
+        'Authorization: Bearer ' . $mom['device_token'],
+    ]);
+    assertEquals(200, $momSnap1['status'], 'Mom fetches circle snapshot');
+    $alexRow = null;
+    foreach ($momSnap1['json']['members'] ?? [] as $m) {
+        if (($m['device_id'] ?? '') === $alex['device_id']) {
+            $alexRow = $m;
+        }
+    }
+    assertTrue($alexRow !== null, 'Circle snapshot includes Alex');
+    assertEquals('at_home', $alexRow['presence_mode'] ?? null, 'Alex appears as at_home to family');
+    assertEquals(true, $alexRow['home_privacy_masked'] ?? false, 'Alex home_privacy_masked is true');
+    assertEquals($homeLat, $alexRow['location']['latitude'] ?? null, 'Indoor jitter masked to Home center latitude');
+    assertEquals($homeLng, $alexRow['location']['longitude'] ?? null, 'Indoor jitter masked to Home center longitude');
+
+    // Alex leaves the house -> emits exited Home event + reports away live coordinates
+    $exitHomeEvt = httpRequest('POST', '/api/family/events/report', [
+        'device_id'   => $alex['device_id'],
+        'place_id'    => $homePlaceId,
+        'event_type'  => 'exited',
+        'occurred_at' => gmdate('c'),
+    ], ['Authorization: Bearer ' . $alex['device_token']]);
+    assertEquals(200, $exitHomeEvt['status'], 'Alex reports leaving Home');
+    assertEquals(false, $exitHomeEvt['json']['deduplicated'] ?? true, 'Initial exit event is not deduplicated');
+
+    // Duplicate exit within 30s is deduplicated
+    $dupExitEvt = httpRequest('POST', '/api/family/events/report', [
+        'device_id'   => $alex['device_id'],
+        'place_id'    => $homePlaceId,
+        'event_type'  => 'exited',
+        'occurred_at' => gmdate('c'),
+    ], ['Authorization: Bearer ' . $alex['device_token']]);
+    assertEquals(true, $dupExitEvt['json']['deduplicated'] ?? false, 'Rapid duplicate exit event deduplicated');
+
+    $awayLat = 14.560500;
+    $awayLng = 121.030500;
+    $secretsToCheck[] = '14.560500';
+    $alexAwayUpd = httpRequest('POST', '/api/location/update', [
+        'device_id'           => $alex['device_id'],
+        'latitude'            => $awayLat,
+        'longitude'           => $awayLng,
+        'accuracy'            => 8.5,
+        'recorded_at'         => gmdate('c'),
+        'presence_mode'       => 'away',
+        'home_privacy_masked' => false,
+        'speed_mps'           => 9.4,
+    ], ['Authorization: Bearer ' . $alex['device_token']]);
+    assertEquals(200, $alexAwayUpd['status'], 'Alex uploads live Away GPS update');
+
+    // Dashboard joins the Family Circle via invite code and sees members, places, and exit event
+    $dashFamJoin = httpRequest('POST', '/api/dashboard/family-join', [
+        'invite_code' => $inviteCode,
+    ], [], null, ['HTTPS' => 'on']);
+    assertEquals(200, $dashFamJoin['status'], 'Laptop dashboard joins Family Circle via invite code');
+    $dashCookie = extractSessionCookie($dashFamJoin['headers']);
+    $dashCsrf = $dashFamJoin['json']['csrf_token'] ?? '';
+    $dashCircle = $dashFamJoin['json']['circles'][0] ?? [];
+    assertEquals('Santos Family', $dashCircle['circle']['name'] ?? null, 'Dashboard sees circle name');
+    assertEquals(2, count($dashCircle['places'] ?? []), 'Dashboard sees Saved Places');
+    assertEquals(1, count($dashCircle['events'] ?? []), 'Dashboard sees Home exit event');
+
+    // Regenerate invite code invalidates old code for new joins
+    $regen = httpRequest('POST', '/api/family/circle/regenerate-code', [
+        'device_id' => $mom['device_id'],
+    ], ['Authorization: Bearer ' . $mom['device_token']]);
+    assertEquals(200, $regen['status'], 'Mom regenerates invite code');
+    $newInviteCode = $regen['json']['invite_code'] ?? '';
+    assertTrue($newInviteCode !== '' && $newInviteCode !== $inviteCode, 'New invite code differs from rotated code');
+    $secretsToCheck[] = $newInviteCode;
+
+    $oldInviteJoin = httpRequest('POST', '/api/family/circle/join', [
+        'device_id'   => $outsider['device_id'],
+        'invite_code' => $inviteCode,
+        'member_name' => 'Intruder',
+    ], ['Authorization: Bearer ' . $outsider['device_token']]);
+    assertEquals(404, $oldInviteJoin['status'], 'Old rotated invite code is rejected');
+
+    // Dashboard cannot modify places without CSRF token
+    $noCsrfPlace = httpRequest('POST', '/api/dashboard/place-upsert', [
+        'circle_id' => $circleId,
+        'name'      => 'Work',
+        'category'  => 'work',
+        'latitude'  => 14.57,
+        'longitude' => 121.04,
+    ], ['Cookie: ' . $dashCookie]);
+    assertEquals(403, $noCsrfPlace['status'], 'Dashboard place upsert rejects missing CSRF token');
+
+    // 9. Rate limit enforcement on pairing endpoint (limit configured to 6)
     $rateLimited = false;
     for ($i = 0; $i < 8; $i++) {
         $rlResp = httpRequest('POST', '/api/dashboard/pair', ['pairing_code' => 'ZZZZ-9999']);
@@ -499,8 +684,43 @@ try {
     }
     assertTrue($rateLimited, 'Pairing endpoint enforces rate limiting with 429');
 
-    // 9. Verify no secrets or coordinates leaked into server logs
+    // 9. Verify dashboard shell CSP, multi-provider map selector, and optional Google Maps config gating
+    $dashResp = httpRequest('GET', '/dashboard/');
+    assertEquals(200, $dashResp['status'], 'Dashboard shell returns 200');
+    assertTrue(stripos($dashResp['headers'], 'Referrer-Policy: strict-origin-when-cross-origin') !== false, 'Dashboard sends strict-origin-when-cross-origin Referrer-Policy');
+    assertTrue(stripos($dashResp['headers'], 'services.arcgisonline.com') !== false, 'Dashboard CSP allows Esri tile CDN');
+    assertTrue(stripos($dashResp['headers'], 'maps.googleapis.com') === false, 'Dashboard CSP omits Google Maps domains when API key is unset');
+    assertTrue(str_contains($dashResp['body'], 'id="map-provider-select"'), 'Dashboard includes map provider selector');
+    assertTrue(!str_contains($dashResp['body'], 'value="google_roadmap"'), 'Dashboard hides Google Maps options when API key is unset');
+
+    $sessConfigResp = httpRequest('GET', '/api/dashboard/session');
+    assertEquals(200, $sessConfigResp['status'], 'Dashboard session returns 200');
+    assertEquals('esri_street', $sessConfigResp['json']['map_config']['default_provider'] ?? null, 'Session reports esri_street default provider');
+    assertEquals(false, $sessConfigResp['json']['map_config']['google_maps_enabled'] ?? null, 'Session disables Google Maps when API key is unset');
+    assertTrue(
+        array_key_exists('google_maps_api_key', $sessConfigResp['json']['map_config'] ?? [])
+            && $sessConfigResp['json']['map_config']['google_maps_api_key'] === null,
+        'Session omits Google API key when unset'
+    );
+
+    $fakeGoogleEnv = [
+        'LOCASHARE_GOOGLE_MAPS_API_KEY'  => 'AIzaTestFakeKeyOnly',
+        'LOCASHARE_MAP_DEFAULT_PROVIDER' => 'google_hybrid',
+    ];
+    $dashGoogleResp = httpRequest('GET', '/dashboard/', null, [], null, $fakeGoogleEnv);
+    assertEquals(200, $dashGoogleResp['status'], 'Dashboard with Google API key returns 200');
+    assertTrue(stripos($dashGoogleResp['headers'], 'maps.googleapis.com') !== false, 'Dashboard CSP allows Google Maps only when API key is configured');
+    assertTrue(str_contains($dashGoogleResp['body'], 'value="google_hybrid"'), 'Dashboard enables Google Maps option when API key is configured');
+    assertTrue(!str_contains($dashGoogleResp['body'], 'AIzaTestFakeKeyOnly'), 'Dashboard HTML shell does not inline raw Google API key');
+
+    $sessGoogleResp = httpRequest('GET', '/api/dashboard/session', null, [], null, $fakeGoogleEnv);
+    assertEquals('google_hybrid', $sessGoogleResp['json']['map_config']['default_provider'] ?? null, 'Session honors configured google_hybrid default provider');
+    assertEquals(true, $sessGoogleResp['json']['map_config']['google_maps_enabled'] ?? null, 'Session enables Google Maps when API key is configured');
+    assertEquals('AIzaTestFakeKeyOnly', $sessGoogleResp['json']['map_config']['google_maps_api_key'] ?? null, 'Session provides configured Google API key to dashboard client');
+
+    // 10. Verify no secrets or coordinates leaked into server logs
     $serverLog = is_file($logPath) ? (file_get_contents($logPath) ?: '') : '';
+    $secretsToCheck[] = 'AIzaTestFakeKeyOnly';
     $leakFound = false;
     foreach ($secretsToCheck as $secret) {
         if ($secret !== '' && str_contains($serverLog, $secret)) {
@@ -508,7 +728,7 @@ try {
             break;
         }
     }
-    assertTrue(!$leakFound, 'Server logs contain zero tokens, pairing codes, or coordinates');
+    assertTrue(!$leakFound, 'Server logs contain zero tokens, pairing codes, API keys, or coordinates');
 
     echo "\nSummary: {$passed} passed, {$failed} failed.\n";
 } finally {

@@ -28,6 +28,20 @@ class Security
         'unregistered',
     ];
 
+    public const VALID_PRESENCE_MODES = [
+        'at_home',
+        'away',
+        'at_place',
+        'unknown',
+    ];
+
+    public const VALID_PLACE_CATEGORIES = [
+        'home',
+        'school',
+        'work',
+        'custom',
+    ];
+
     private static ?string $cachedRawInput = null;
     private static ?string $testRawInputOverride = null;
 
@@ -361,12 +375,117 @@ class Security
     }
 
     /**
-     * Redact sensitive values (coordinates, bearer tokens, pairing codes) before logging.
+     * Generate unique circle/place/event IDs.
+     */
+    public static function generateCircleId(): string
+    {
+        return 'cir_' . bin2hex(random_bytes(10));
+    }
+
+    public static function generatePlaceId(): string
+    {
+        return 'plc_' . bin2hex(random_bytes(10));
+    }
+
+    public static function generateEventId(): string
+    {
+        return 'evt_' . bin2hex(random_bytes(10));
+    }
+
+    /**
+     * Generate a shareable Family Circle invite code (FAM-XXXX-XXXX).
+     *
+     * @return array{raw: string, formatted: string, hash: string}
+     */
+    public static function generateInviteCode(): array
+    {
+        $alphabet = self::PAIRING_ALPHABET;
+        $maxIndex = strlen($alphabet) - 1;
+        $body = '';
+        for ($i = 0; $i < 8; $i++) {
+            $body .= $alphabet[random_int(0, $maxIndex)];
+        }
+        $formatted = 'FAM-' . substr($body, 0, 4) . '-' . substr($body, 4, 4);
+        $raw = 'FAM' . $body;
+        return [
+            'raw'       => $raw,
+            'formatted' => $formatted,
+            'hash'      => self::hashToken($raw),
+        ];
+    }
+
+    public static function normalizeInviteCode(string $input): string
+    {
+        $trimmed = trim($input);
+        if (stripos($trimmed, 'invite=') !== false) {
+            $queryPos = strpos($trimmed, '?');
+            $queryStr = $queryPos !== false ? substr($trimmed, $queryPos + 1) : $trimmed;
+            parse_str($queryStr, $params);
+            if (!empty($params['invite']) && is_string($params['invite'])) {
+                $trimmed = $params['invite'];
+            }
+        }
+        return strtoupper((string) preg_replace('/[\s\-_]+/', '', $trimmed));
+    }
+
+    public static function isValidIdentifier(mixed $id, string $prefix = ''): bool
+    {
+        if (!is_string($id)) {
+            return false;
+        }
+        $trimmed = trim($id);
+        if ($prefix !== '' && !str_starts_with($trimmed, $prefix)) {
+            return false;
+        }
+        return (bool) preg_match('/^[a-zA-Z0-9_\-]{4,64}$/', $trimmed);
+    }
+
+    public static function validatePresenceMode(mixed $mode, string $default = 'unknown'): string
+    {
+        if (!is_string($mode)) {
+            return $default;
+        }
+        $norm = strtolower(trim($mode));
+        return in_array($norm, self::VALID_PRESENCE_MODES, true) ? $norm : $default;
+    }
+
+    public static function validatePlaceCategory(mixed $cat, string $default = 'custom'): string
+    {
+        if (!is_string($cat)) {
+            return $default;
+        }
+        $norm = strtolower(trim($cat));
+        return in_array($norm, self::VALID_PLACE_CATEGORIES, true) ? $norm : $default;
+    }
+
+    public static function validateRadiusMeters(mixed $radius, int $default = 150): int
+    {
+        if (!is_numeric($radius) || is_bool($radius)) {
+            return $default;
+        }
+        $val = (int) round((float) $radius);
+        return max(50, min(5000, $val));
+    }
+
+    public static function haversineMeters(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $earthRadiusM = 6371000.0;
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLng = deg2rad($lng2 - $lng1);
+        $a = sin($dLat / 2) ** 2
+            + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * (sin($dLng / 2) ** 2);
+        return 2.0 * $earthRadiusM * atan2(sqrt($a), sqrt(max(0.0, 1.0 - $a)));
+    }
+
+    /**
+     * Redact sensitive values (coordinates, bearer tokens, pairing/invite codes) before logging.
      */
     public static function redactMessage(string $message): string
     {
         // Redact Bearer tokens
         $redacted = (string) preg_replace('/Bearer\s+[A-Za-z0-9\-._~+\/]+=*/i', 'Bearer [REDACTED]', $message);
+        // Redact family invite codes
+        $redacted = (string) preg_replace('/\bFAM-[A-Z0-9]{4}-[A-Z0-9]{4}\b/i', 'FAM-[REDACTED]', $redacted);
         // Redact 32+ char hex strings (tokens/hashes)
         $redacted = (string) preg_replace('/\b[a-f0-9]{32,64}\b/i', '[REDACTED_TOKEN]', $redacted);
         // Redact decimal coordinate patterns

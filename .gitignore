@@ -10,13 +10,25 @@ backend/database/*.sqlite-wal
 # Runtime Logs
 backend/logs/*.log
 
-# Android Build & Local SDK Config
+# Flutter & Android Build Artifacts / Local SDK Config
+mobile/.dart_tool/
+mobile/build/
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/*.iml
+mobile/android/.idea/
 android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
 android/*.iml
+android/**/*.iml
 android/.idea/
+mobile/*.iml
+.idea/
+*.apk
+!backend/dashboard/assets/LocaShare.apk
+*.aab
 
 # OS & Editor files
 .DS_Store

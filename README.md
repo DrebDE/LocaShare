@@ -1,8 +1,8 @@
 # LocaShare
 
-**LocaShare** is a privacy-first, owner-controlled Android phone location-sharing app with a responsive laptop web dashboard and PHP backend.
+**LocaShare** is a privacy-first, owner-controlled Android family location-sharing app with a Flutter mobile client, responsive laptop web dashboard, PHP backend, and free-tier Supabase Cloud backend.
 
-A phone owner can tap **“Register this device”** in the Android app—without creating an account, username, password, or email login—and pair the phone to a laptop browser using a short-lived, single-use pairing code or QR code. Once paired and after the owner explicitly grants location permission and taps **“Start sharing”**, the phone appears in the laptop dashboard's device list and interactive map over either Wi-Fi or mobile data.
+Family members can create or join a **Family Circle** with a shareable invite code (`FAM-XXXX-XXXX`), set a **Home** geofence plus **School / Work / Custom** Saved Places, and get automatic **At-Home battery & privacy mode** inside the house—switching automatically to **live GPS tracking + enter/exit alerts** whenever anyone leaves home over Wi-Fi or mobile data.
 
 ---
 
@@ -97,6 +97,8 @@ Key environment variables:
 - `LOCASHARE_ONLINE_THRESHOLD_SECONDS`: Phone heartbeat freshness window in seconds (default `90`).
 - `LOCASHARE_LOCATION_STALE_SECONDS`: Location-fix freshness window in seconds (default `180`).
 - `LOCASHARE_COOKIE_SECURE`: `auto` (enables `Secure` cookie flag automatically over HTTPS), `true` (recommended in production HTTPS deployments), or `false`.
+- `LOCASHARE_MAP_DEFAULT_PROVIDER`: Default dashboard map layer (`esri_street` default, `esri_hybrid`, `esri_satellite`, `osm`, `grid`, or `google_roadmap` / `google_hybrid` if `LOCASHARE_GOOGLE_MAPS_API_KEY` is set).
+- `LOCASHARE_GOOGLE_MAPS_API_KEY`: Optional Google Maps JavaScript API key for native Google Maps mode (leave blank to use Esri Street / Esri Satellite Hybrid / OpenStreetMap / Local Privacy Grid with zero API keys).
 
 ### 2. Initialize the Database
 Run the CLI setup script (creates tables for SQLite or MySQL/MariaDB):
@@ -184,8 +186,31 @@ The compiled debug APK is generated at `android/app/build/outputs/apk/debug/app-
   - Every location write requires the phone's valid per-device Bearer token (`Auth::requireDevice`).
   - Every dashboard read requires a valid `HttpOnly`, `SameSite`, `Secure` session cookie (`locashare_session`) paired to that specific device (`dashboard_device_pairings`), and state-changing dashboard requests require a matching `X-CSRF-Token`.
 - **Map Provider Attribution & Coordinate Data Flow**:
-  - By default, the laptop dashboard renders in **Local Privacy Grid Mode**, which plots device markers, accuracy circles (in meters), and coordinate graticules on an HTML5 Canvas in your browser with **zero external network requests**.
-  - You can optionally toggle **“Load OpenStreetMap Street Tiles”** in the map footer. When enabled, your browser loads standard raster map tiles (`https://tile.openstreetmap.org/{z}/{x}/{y}.png`) for the visible viewport from **OpenStreetMap** ([© OpenStreetMap contributors](https://www.openstreetmap.org/copyright), [OSM Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/)). Marker plotting and accuracy circles always stay local in your browser; exact device coordinates are never sent to any third-party geocoding or analytics service.
+  - **Built-in Map Styles (Zero API Keys Required)**:
+    - **Street Map (`Esri World Street` — default)** and **Satellite / Hybrid (`Esri World Imagery` + reference road/place labels)**: Uses ArcGIS Online public raster tiles (`https://services.arcgisonline.com`). Attribution: *Tiles © Esri — Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, METI, GIS User Community* and *Sources: Esri, Maxar, Earthstar Geographics, and the GIS User Community*. Only visible `z/y/x` viewport tile indices are requested; exact device coordinates and pins are rendered locally on HTML5 Canvas in your browser and never sent to Esri.
+    - **OpenStreetMap Standard (`osm`)**: Loads `https://tile.openstreetmap.org/{z}/{x}/{y}.png` ([© OpenStreetMap contributors](https://www.openstreetmap.org/copyright)). Only `z/x/y` viewport tile indices leave your browser.
+    - **Local Privacy Grid (`grid`)**: Renders coordinate graticules, accuracy circles (in meters), and device markers completely locally with **zero external network requests**.
+  - **Optional Native Google Maps (`google_roadmap` / `google_hybrid`)**:
+    - If you set `LOCASHARE_GOOGLE_MAPS_API_KEY` in `backend/.env` (with Maps JavaScript API enabled and HTTP referrer restrictions configured in Google Cloud), the dashboard offers **Google Maps (Roadmap)** and **Google Maps (Satellite + Labels)**.
+    - **Data-flow notice**: When an active Google Maps mode is selected, Google's Maps JavaScript SDK (`maps.googleapis.com`) loads in your browser and receives the visible map viewport and plotted marker coordinates. Switch to **Esri** or **Local Privacy Grid** at any time to keep exact coordinates off third-party map providers.
+
+---
+
+## Family Circles, Home Geofencing & Cloud Mode (Life360-Style)
+
+1. **Choose Cloud or Self-Hosted Backend**:
+   - **Supabase Cloud (Free Tier, Recommended for Mobile Data)**: Follow [`supabase/README.md`](supabase/README.md) to run `supabase/schema.sql` (and optionally deploy `supabase/functions/place-event-notify/index.ts` for FCM push alerts). In the app's **Circle & Device** tab → **Backend Settings**, select **Supabase Cloud** and enter your Project URL + anon key.
+   - **Self-Hosted PHP Server**: Run `backend/` locally (`127.0.0.1:8080`) or behind a public `https://` reverse proxy / Cloudflare Tunnel.
+2. **Create or Join a Family Circle**:
+   - Register each phone (no email or password needed).
+   - One family member taps **Create Circle** to receive a shareable `FAM-XXXX-XXXX` invite code.
+   - Other family phones (and optionally the Laptop Web Dashboard via **+ Family Circle**) join with that code.
+3. **Set Home & Saved Places (School, Work, Custom)**:
+   - Open the **Places & Alerts** tab and tap **Set Home Location** (using your current GPS or tapping on the map) and choose a radius (default `150m`).
+   - Add **School**, **Work**, or custom places with arrive/leave alert toggles.
+4. **Smart Home Mode (At Home vs. Out of the House)**:
+   - **Inside Home**: Phones automatically switch to low-power monitoring, mask indoor GPS jitter to the Home pin, and display **At Home · Battery Saver**.
+   - **Out of the House**: Once a phone leaves the Home boundary (confirmed with hysteresis to prevent false alarms), LocaShare automatically escalates to live GPS tracking, posts a **left Home** alert to the family, and fires system notifications when family members arrive at or leave School, Work, or Home.
 
 ---
 

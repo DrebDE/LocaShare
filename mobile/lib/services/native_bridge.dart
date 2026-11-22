@@ -8,6 +8,21 @@ abstract class NativeLocationBridge {
   Future<void> openAppSettings();
   Future<void> openLocationSettings();
   Future<Map<String, dynamic>> setServerUrl(String serverUrl);
+  Future<Map<String, dynamic>> setBackendConfig({
+    required String backendMode,
+    required String serverUrl,
+    required String supabaseUrl,
+    required String supabaseAnonKey,
+  });
+  Future<Map<String, dynamic>> setSmartHomeMode(bool enabled);
+  Future<Map<String, dynamic>> setCircleInfo({
+    required String circleId,
+    required String circleName,
+    required String memberName,
+  });
+  Future<Map<String, dynamic>> setSavedPlacesJson(String placesJson);
+  Future<Map<String, dynamic>> syncFamilyAlertsNow();
+  Future<Map<String, dynamic>> getCurrentLocation();
   Future<Map<String, dynamic>> setIntervalMs(int intervalMs);
   Future<Map<String, dynamic>> configureDevice({
     required String serverUrl,
@@ -73,6 +88,60 @@ class MethodChannelNativeBridge implements NativeLocationBridge {
         'setServerUrl',
         {'serverUrl': serverUrl},
       ));
+
+  @override
+  Future<Map<String, dynamic>> setBackendConfig({
+    required String backendMode,
+    required String serverUrl,
+    required String supabaseUrl,
+    required String supabaseAnonKey,
+  }) async =>
+      _normalize(await _methodChannel.invokeMethod<Object?>(
+        'setBackendConfig',
+        {
+          'backendMode': backendMode,
+          'serverUrl': serverUrl,
+          'supabaseUrl': supabaseUrl,
+          'supabaseAnonKey': supabaseAnonKey,
+        },
+      ));
+
+  @override
+  Future<Map<String, dynamic>> setSmartHomeMode(bool enabled) async =>
+      _normalize(await _methodChannel.invokeMethod<Object?>(
+        'setSmartHomeMode',
+        {'enabled': enabled},
+      ));
+
+  @override
+  Future<Map<String, dynamic>> setCircleInfo({
+    required String circleId,
+    required String circleName,
+    required String memberName,
+  }) async =>
+      _normalize(await _methodChannel.invokeMethod<Object?>(
+        'setCircleInfo',
+        {
+          'circleId': circleId,
+          'circleName': circleName,
+          'memberName': memberName,
+        },
+      ));
+
+  @override
+  Future<Map<String, dynamic>> setSavedPlacesJson(String placesJson) async =>
+      _normalize(await _methodChannel.invokeMethod<Object?>(
+        'setSavedPlaces',
+        {'placesJson': placesJson},
+      ));
+
+  @override
+  Future<Map<String, dynamic>> syncFamilyAlertsNow() async => _normalize(
+      await _methodChannel.invokeMethod<Object?>('syncFamilyAlertsNow'));
+
+  @override
+  Future<Map<String, dynamic>> getCurrentLocation() async => _normalize(
+      await _methodChannel.invokeMethod<Object?>('getCurrentLocation'));
 
   @override
   Future<Map<String, dynamic>> setIntervalMs(int intervalMs) async =>

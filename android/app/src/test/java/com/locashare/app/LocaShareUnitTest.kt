@@ -186,4 +186,22 @@ class LocaShareUnitTest {
         assertTrue(matrix[0][0])
         assertTrue(matrix[6][6])
     }
+
+    companion object {
+        @JvmStatic
+        fun main(args: Array<String>) {
+            val suite = LocaShareUnitTest()
+            suite.offlineStore_replacesOlderPointWithNewestAndIgnoresStaleOutOfOrderFix()
+            println("  [PASS] offlineStore_replacesOlderPointWithNewestAndIgnoresStaleOutOfOrderFix")
+            suite.locationSample_validatesCoordinateAndAccuracyRanges()
+            println("  [PASS] locationSample_validatesCoordinateAndAccuracyRanges")
+            suite.trackingStateResolver_reportsHonestStates()
+            println("  [PASS] trackingStateResolver_reportsHonestStates")
+            suite.serverUrlValidator_enforcesHttpsForRemoteHosts()
+            println("  [PASS] serverUrlValidator_enforcesHttpsForRemoteHosts")
+            suite.pairingQrGenerator_encodesPairingUriMatrix()
+            println("  [PASS] pairingQrGenerator_encodesPairingUriMatrix")
+            println("All Android JVM unit tests passed!")
+        }
+    }
 }

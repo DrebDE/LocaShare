@@ -842,3 +842,184 @@ html, body {
         min-height: 360px;
     }
 }
+
+/* Multi-provider selector and optional Google Maps host */
+.map-provider-select {
+    background: rgba(15, 23, 42, 0.92);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.map-provider-select:focus {
+    outline: 2px solid rgba(56, 189, 248, 0.55);
+    outline-offset: 1px;
+}
+
+.google-map-stage {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 15;
+    background: #0b1120;
+}
+
+.google-map-stage.hidden {
+    display: none;
+}
+
+/* Family Circle, Saved Places & Place Alerts */
+.family-panel {
+    margin-top: 1rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.family-panel h2 {
+    margin: 0;
+    font-size: 0.96rem;
+}
+
+.family-invite-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.65rem;
+    border-radius: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    font-size: 0.78rem;
+    margin-bottom: 0.75rem;
+}
+
+.family-invite-actions {
+    display: flex;
+    gap: 0.35rem;
+}
+
+.family-subsection {
+    margin-top: 0.75rem;
+}
+
+.family-subsection h3 {
+    margin: 0 0 0.45rem;
+    font-size: 0.84rem;
+    color: var(--text-secondary);
+}
+
+.places-list,
+.events-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+
+.place-item,
+.event-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.65rem;
+    border-radius: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    font-size: 0.78rem;
+}
+
+.place-item-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.place-item-title {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.place-item-sub,
+.event-item-time {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.place-item-actions {
+    display: flex;
+    gap: 0.3rem;
+    flex-shrink: 0;
+}
+
+.badge-at-home {
+    background: rgba(16, 185, 129, 0.18);
+    color: #6ee7b7;
+    border: 1px solid rgba(16, 185, 129, 0.45);
+}
+
+.badge-away {
+    background: rgba(14, 165, 233, 0.18);
+    color: #7dd3fc;
+    border: 1px solid rgba(14, 165, 233, 0.45);
+}
+
+.badge-at-place {
+    background: rgba(139, 92, 246, 0.18);
+    color: #c4b5fd;
+    border: 1px solid rgba(139, 92, 246, 0.45);
+}
+
+.place-select-full {
+    width: 100%;
+    margin-bottom: 0.65rem;
+}
+
+.place-coord-col {
+    flex: 1;
+}
+
+.place-coord-actions {
+    margin: 0.45rem 0 0.7rem;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.place-radius-slider {
+    width: 100%;
+    margin-bottom: 0.7rem;
+}
+
+.place-notify-row {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 0.85rem;
+    font-size: 0.82rem;
+}
+
+.btn-full {
+    width: 100%;
+}
+
+.map-viewport.pick-mode {
+    cursor: crosshair;
+}
+
+.place-marker-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.92);
+    border: 1px solid rgba(16, 185, 129, 0.7);
+    color: #a7f3d0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    white-space: nowrap;
+}

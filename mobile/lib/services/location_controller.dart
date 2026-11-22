@@ -1,13 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
 import '../models/device_state.dart';
+import '../models/family_models.dart';
 import '../services/locashare_api.dart';
 import '../services/native_bridge.dart';
 
 /// Application state controller coordinating registration, one-time pairing codes,
-/// permission gating, foreground sharing, and error/offline state handling.
+/// Family Circles, Saved Places (Home/School/Work), Smart Home geofencing,
+/// permission gating, foreground sharing, and Supabase/PHP backend sync.
 class LocationController extends ChangeNotifier {
   LocationController({
     required this._api,
@@ -21,6 +24,12 @@ class LocationController extends ChangeNotifier {
 
   DeviceTrackerState _state = const DeviceTrackerState();
   DeviceTrackerState get state => _state;
+
+  FamilySnapshot _family = const FamilySnapshot();
+  FamilySnapshot get family => _family;
+
+  String? _selectedMemberDeviceId;
+  String? get selectedMemberDeviceId => _selectedMemberDeviceId;
 
   StreamSubscription<Map<String, dynamic>>? _nativeSub;
   Timer? _countdownTimer;
@@ -53,15 +62,26 @@ class LocationController extends ChangeNotifier {
         const Duration(seconds: 15),
         (_) {
           if (_state.isRegistered) {
-            refreshServerStatus(quiet: true);
+            if (!_state.isSupabaseMode) {
+              refreshServerStatus(quiet: true);
+            }
+            refreshFamilySnapshot(quiet: true);
           }
         },
       );
     }
 
     if (_state.isRegistered) {
-      await refreshServerStatus(quiet: true);
+      if (!_state.isSupabaseMode) {
+        await refreshServerStatus(quiet: true);
+      }
+      await refreshFamilySnapshot(quiet: true);
     }
+  }
+
+  void selectFamilyMember(String? deviceId) {
+    _selectedMemberDeviceId = deviceId;
+    notifyListeners();
   }
 
   void _applyNativeSnapshot(Map<String, dynamic> raw) {
@@ -78,13 +98,20 @@ class LocationController extends ChangeNotifier {
     }
 
     final nextServerUrl = (raw['serverUrl'] as String?)?.trim();
+    final nextSupaUrl = (raw['supabaseUrl'] as String?)?.trim();
+    final nextSupaKey = (raw['supabaseAnonKey'] as String?)?.trim();
     final nextDeviceName = (raw['deviceName'] as String?)?.trim();
     final defaultName = (raw['defaultDeviceName'] as String?)?.trim();
 
     _state = _state.copyWith(
+      backendMode: raw.containsKey('backendMode')
+          ? BackendMode.fromWire(raw['backendMode'] as String?)
+          : _state.backendMode,
       serverUrl: (nextServerUrl != null && nextServerUrl.isNotEmpty)
           ? nextServerUrl
           : _state.serverUrl,
+      supabaseUrl: nextSupaUrl ?? _state.supabaseUrl,
+      supabaseAnonKey: nextSupaKey ?? _state.supabaseAnonKey,
       deviceId: (raw['deviceId'] as String?) ?? _state.deviceId,
       deviceToken: (raw['deviceToken'] as String?) ?? _state.deviceToken,
       deviceName: (nextDeviceName != null && nextDeviceName.isNotEmpty)
@@ -94,6 +121,22 @@ class LocationController extends ChangeNotifier {
               : _state.deviceName),
       isSharing: isSharing,
       statusState: parsedState,
+      smartHomeMode: raw['smartHomeMode'] as bool? ?? _state.smartHomeMode,
+      presenceMode: raw.containsKey('presenceMode')
+          ? PresenceMode.fromWire(raw['presenceMode'] as String?)
+          : _state.presenceMode,
+      currentPlaceId: raw.containsKey('currentPlaceId')
+          ? raw['currentPlaceId'] as String?
+          : _state.currentPlaceId,
+      currentPlaceName: raw.containsKey('currentPlaceName')
+          ? raw['currentPlaceName'] as String?
+          : _state.currentPlaceName,
+      homePrivacyMasked: raw['homePrivacyMasked'] as bool? ?? _state.homePrivacyMasked,
+      lastLatitude: (raw['lastLatitude'] as num?)?.toDouble() ?? _state.lastLatitude,
+      lastLongitude: (raw['lastLongitude'] as num?)?.toDouble() ?? _state.lastLongitude,
+      circleId: (raw['circleId'] as String?) ?? _state.circleId,
+      circleName: (raw['circleName'] as String?) ?? _state.circleName,
+      memberName: (raw['memberName'] as String?) ?? _state.memberName,
       updateIntervalMs:
           (raw['updateIntervalMs'] as num?)?.toInt() ?? _state.updateIntervalMs,
       lastUploadAt: DeviceTrackerState.parseIsoDate(raw['lastUploadAt']) ??
@@ -132,21 +175,81 @@ class LocationController extends ChangeNotifier {
       return false;
     }
 
-    _state = _state.copyWith(serverUrl: trimmed, clearLastError: true);
+    _state = _state.copyWith(
+      backendMode: BackendMode.php,
+      serverUrl: trimmed,
+      clearLastError: true,
+    );
     _statusMessage = 'Saved server URL.';
     notifyListeners();
     try {
-      await _bridge.setServerUrl(trimmed);
+      await _bridge.setBackendConfig(
+        backendMode: 'php',
+        serverUrl: trimmed,
+        supabaseUrl: _state.supabaseUrl,
+        supabaseAnonKey: _state.supabaseAnonKey,
+      );
+    } catch (_) {}
+    return true;
+  }
+
+  Future<bool> saveBackendConfig({
+    required BackendMode mode,
+    String? serverUrl,
+    String? supabaseUrl,
+    String? supabaseAnonKey,
+  }) async {
+    final nextServer = (serverUrl ?? _state.serverUrl).trim().replaceAll(RegExp(r'/+$'), '');
+    final nextSupaUrl = (supabaseUrl ?? _state.supabaseUrl).trim().replaceAll(RegExp(r'/+$'), '');
+    final nextSupaKey = (supabaseAnonKey ?? _state.supabaseAnonKey).trim();
+
+    if (mode == BackendMode.supabase) {
+      final uri = Uri.tryParse(nextSupaUrl);
+      if (uri == null || uri.scheme.toLowerCase() != 'https' || uri.host.isEmpty) {
+        _setFeedback(error: 'Enter a valid https:// Supabase Project URL.');
+        return false;
+      }
+      if (nextSupaKey.length < 16) {
+        _setFeedback(error: 'Enter your Supabase anon public key.');
+        return false;
+      }
+    } else {
+      final uri = Uri.tryParse(nextServer);
+      if (uri == null ||
+          !uri.hasScheme ||
+          !(uri.scheme == 'http' || uri.scheme == 'https') ||
+          uri.host.isEmpty) {
+        _setFeedback(error: 'Enter a valid http:// or https:// server URL.');
+        return false;
+      }
+    }
+
+    _state = _state.copyWith(
+      backendMode: mode,
+      serverUrl: nextServer,
+      supabaseUrl: nextSupaUrl,
+      supabaseAnonKey: nextSupaKey,
+      clearLastError: true,
+    );
+    _statusMessage = 'Switched backend to ${mode.displayLabel}.';
+    notifyListeners();
+    try {
+      await _bridge.setBackendConfig(
+        backendMode: mode.toWire(),
+        serverUrl: nextServer,
+        supabaseUrl: nextSupaUrl,
+        supabaseAnonKey: nextSupaKey,
+      );
     } catch (_) {}
     return true;
   }
 
   Future<bool> checkServerConnection() async {
-    _setBusy('Checking server...');
-    final res = await _api.checkHealth(_state.serverUrl);
+    _setBusy('Checking backend...');
+    final res = await _api.checkBackendHealth(_state);
     _clearBusy();
     if (res.ok) {
-      _setFeedback(message: 'Connected cleanly to LocaShare server.');
+      _setFeedback(message: 'Connected cleanly to ${_state.backendMode.displayLabel}.');
       return true;
     }
     _setFeedback(error: res.error ?? 'Unable to reach backend server.');
@@ -159,8 +262,8 @@ class LocationController extends ChangeNotifier {
         : _state.deviceName;
 
     _setBusy('Registering device...');
-    final res = await _api.registerDevice(
-      serverUrl: _state.serverUrl,
+    final res = await _api.registerDeviceForBackend(
+      state: _state,
       deviceName: targetName,
     );
 
@@ -175,22 +278,29 @@ class LocationController extends ChangeNotifier {
     final hasPerm = permCheck['hasLocationPermission'] as bool? ??
         _state.hasLocationPermission;
 
+    final nextState = _state.isSupabaseMode
+        ? (hasPerm ? PhoneStatusState.registered : PhoneStatusState.permissionMissing)
+        : PhoneStatusState.waitingForPairing;
+
     _state = _state.copyWith(
       deviceId: data.deviceId,
       deviceName: data.deviceName,
       deviceToken: data.deviceToken,
-      pairingCode: data.pairingCode,
-      pairingQrPayload: data.pairingQrPayload,
+      pairingCode: data.pairingCode.isNotEmpty ? data.pairingCode : null,
+      clearPairingCode: data.pairingCode.isEmpty,
+      pairingQrPayload: data.pairingQrPayload.isNotEmpty ? data.pairingQrPayload : null,
       pairingExpiresAt: data.pairingExpiresAt,
+      clearPairingExpiry: data.pairingExpiresAt == null,
       pairedDashboardsCount: 0,
       isSharing: false,
-      statusState: PhoneStatusState.waitingForPairing,
+      statusState: nextState,
       hasLocationPermission: hasPerm,
       clearLastError: true,
       clearBusyAction: true,
     );
-    _statusMessage =
-        'Device registered. Enter or scan the one-time code on your laptop dashboard.';
+    _statusMessage = _state.isSupabaseMode
+        ? 'Device registered on Supabase Cloud. Create or join a Family Circle!'
+        : 'Device registered. Create/join a Family Circle or pair with your laptop dashboard.';
     notifyListeners();
 
     await _bridge.configureDevice(
@@ -205,7 +315,7 @@ class LocationController extends ChangeNotifier {
   }
 
   Future<bool> refreshPairingCode() async {
-    if (!_state.isRegistered) return false;
+    if (!_state.isRegistered || _state.isSupabaseMode) return false;
     _setBusy('Generating new pairing code...');
     final res = await _api.generatePairingCode(
       serverUrl: _state.serverUrl,
@@ -237,7 +347,7 @@ class LocationController extends ChangeNotifier {
   }
 
   Future<void> refreshServerStatus({bool quiet = false}) async {
-    if (!_state.isRegistered) return;
+    if (!_state.isRegistered || _state.isSupabaseMode) return;
     final res = await _api.fetchStatus(
       serverUrl: _state.serverUrl,
       deviceId: _state.deviceId,
@@ -274,6 +384,225 @@ class LocationController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ── Family Circles, Saved Places & Smart Home Geofencing ──────
+
+  Future<bool> createFamilyCircle({
+    required String circleName,
+    String? memberName,
+  }) async {
+    if (!_state.isRegistered) {
+      _setFeedback(error: 'Register this device first.');
+      return false;
+    }
+    _setBusy('Creating family circle...');
+    final res = await _api.createFamilyCircle(
+      state: _state,
+      circleName: circleName.trim().isEmpty ? 'Our Family' : circleName.trim(),
+      memberName: (memberName ?? '').trim().isEmpty
+          ? _state.deviceName
+          : memberName!.trim(),
+    );
+    _clearBusy();
+
+    if (!res.ok || res.data == null) {
+      _setFeedback(error: res.error ?? 'Could not create family circle.');
+      return false;
+    }
+
+    await _applyFamilySnapshot(res.data!);
+    _statusMessage = 'Created "${res.data!.circle?.name ?? circleName}". Share your invite code with family!';
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> joinFamilyCircle({
+    required String inviteCode,
+    String? memberName,
+  }) async {
+    if (!_state.isRegistered) {
+      _setFeedback(error: 'Register this device first.');
+      return false;
+    }
+    _setBusy('Joining family circle...');
+    final res = await _api.joinFamilyCircle(
+      state: _state,
+      inviteCode: inviteCode.trim(),
+      memberName: (memberName ?? '').trim().isEmpty
+          ? _state.deviceName
+          : memberName!.trim(),
+    );
+    _clearBusy();
+
+    if (!res.ok || res.data == null) {
+      _setFeedback(error: res.error ?? 'Invite code not found.');
+      return false;
+    }
+
+    await _applyFamilySnapshot(res.data!);
+    _statusMessage = 'Joined "${res.data!.circle?.name ?? 'Family Circle'}"!';
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> leaveFamilyCircle() async {
+    if (!_state.isRegistered) return false;
+    _setBusy('Leaving circle...');
+    final res = await _api.leaveFamilyCircle(_state);
+    _clearBusy();
+    if (!res.ok) {
+      _setFeedback(error: res.error ?? 'Failed to leave circle.');
+      return false;
+    }
+    _family = const FamilySnapshot();
+    _selectedMemberDeviceId = null;
+    _state = _state.copyWith(
+      circleId: '',
+      circleName: '',
+      memberName: '',
+      clearLastError: true,
+    );
+    try {
+      await _bridge.setCircleInfo(circleId: '', circleName: '', memberName: '');
+      await _bridge.setSavedPlacesJson('[]');
+    } catch (_) {}
+    _statusMessage = 'Left family circle.';
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> regenerateCircleInviteCode() async {
+    if (!_state.isRegistered) return false;
+    _setBusy('Rotating invite code...');
+    final res = await _api.regenerateCircleInvite(_state);
+    _clearBusy();
+    if (!res.ok || res.data == null || res.data!.isEmpty) {
+      _setFeedback(error: res.error ?? 'Could not regenerate invite code.');
+      return false;
+    }
+    await refreshFamilySnapshot(quiet: true);
+    _statusMessage = 'Generated a new family invite code.';
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> refreshFamilySnapshot({bool quiet = false}) async {
+    if (!_state.isRegistered) return;
+    final res = await _api.fetchCircleSnapshot(_state);
+    if (!res.ok || res.data == null) {
+      if (!quiet) {
+        _setFeedback(error: res.error ?? 'Failed to refresh family circle.');
+      }
+      return;
+    }
+    await _applyFamilySnapshot(res.data!);
+  }
+
+  Future<bool> upsertSavedPlace({
+    String? placeId,
+    required String name,
+    required PlaceCategory category,
+    required double latitude,
+    required double longitude,
+    required int radiusMeters,
+    required bool notifyOnEnter,
+    required bool notifyOnExit,
+  }) async {
+    if (!_state.isRegistered || _family.circle == null) {
+      _setFeedback(error: 'Create or join a Family Circle before adding places.');
+      return false;
+    }
+    _setBusy('Saving place...');
+    final res = await _api.upsertSavedPlace(
+      state: _state,
+      placeId: placeId,
+      name: name.trim(),
+      category: category,
+      latitude: latitude,
+      longitude: longitude,
+      radiusMeters: radiusMeters,
+      isHome: category == PlaceCategory.home,
+      notifyOnEnter: notifyOnEnter,
+      notifyOnExit: notifyOnExit,
+    );
+    _clearBusy();
+    if (!res.ok || res.data == null) {
+      _setFeedback(error: res.error ?? 'Failed to save place.');
+      return false;
+    }
+    await _applyFamilySnapshot(res.data!);
+    _statusMessage = 'Saved "${name.trim()}" (${radiusMeters}m geofence).';
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> deleteSavedPlace(String placeId) async {
+    if (!_state.isRegistered) return false;
+    _setBusy('Deleting place...');
+    final res = await _api.deleteSavedPlace(state: _state, placeId: placeId);
+    _clearBusy();
+    if (!res.ok || res.data == null) {
+      _setFeedback(error: res.error ?? 'Failed to delete place.');
+      return false;
+    }
+    await _applyFamilySnapshot(res.data!);
+    _statusMessage = 'Deleted saved place.';
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> setSmartHomeMode(bool enabled) async {
+    _state = _state.copyWith(smartHomeMode: enabled);
+    _statusMessage = enabled
+        ? 'Smart Home Mode enabled (Battery saver + privacy at Home, live GPS when away).'
+        : 'Always Live GPS enabled everywhere.';
+    notifyListeners();
+    try {
+      final nextSnap = await _bridge.setSmartHomeMode(enabled);
+      _applyNativeSnapshot(nextSnap);
+    } catch (_) {}
+  }
+
+  Future<({double lat, double lng})?> getCurrentCoordinates() async {
+    try {
+      final raw = await _bridge.getCurrentLocation();
+      final lat = (raw['latitude'] as num?)?.toDouble();
+      final lng = (raw['longitude'] as num?)?.toDouble();
+      if (lat != null && lng != null) {
+        return (lat: lat, lng: lng);
+      }
+    } catch (_) {}
+    if (_state.lastLatitude != null && _state.lastLongitude != null) {
+      return (lat: _state.lastLatitude!, lng: _state.lastLongitude!);
+    }
+    return null;
+  }
+
+  Future<void> _applyFamilySnapshot(FamilySnapshot snapshot) async {
+    _family = snapshot;
+    final circle = snapshot.circle;
+    _state = _state.copyWith(
+      circleId: circle?.circleId ?? '',
+      circleName: circle?.name ?? '',
+      memberName: circle?.myMemberName ?? '',
+    );
+
+    if (_selectedMemberDeviceId == null && snapshot.members.isNotEmpty) {
+      _selectedMemberDeviceId = snapshot.members.first.deviceId;
+    }
+
+    try {
+      await _bridge.setCircleInfo(
+        circleId: circle?.circleId ?? '',
+        circleName: circle?.name ?? '',
+        memberName: circle?.myMemberName ?? '',
+      );
+      await _bridge.setSavedPlacesJson(
+        jsonEncode(snapshot.places.map((p) => p.toJson()).toList()),
+      );
+    } catch (_) {}
+    notifyListeners();
+  }
+
   Future<bool> requestPermissionsFromOs() async {
     _setBusy('Requesting permissions...');
     final perms = await _bridge.requestLocationPermissions();
@@ -302,7 +631,7 @@ class LocationController extends ChangeNotifier {
     }
     notifyListeners();
 
-    if (!hasLoc && _state.isRegistered) {
+    if (!hasLoc && _state.isRegistered && !_state.isSupabaseMode) {
       await _api.sendHeartbeat(
         serverUrl: _state.serverUrl,
         deviceId: _state.deviceId,
@@ -326,8 +655,6 @@ class LocationController extends ChangeNotifier {
     _applyNativeSnapshot(snap);
   }
 
-  /// Starts location sharing ONLY after the user taps "Start sharing" and
-  /// location permission has been granted.
   Future<bool> startSharing() async {
     if (!_state.isRegistered) {
       _setFeedback(error: 'Register this device before starting sharing.');
@@ -389,7 +716,7 @@ class LocationController extends ChangeNotifier {
   }
 
   Future<bool> revokeDashboardPairings() async {
-    if (!_state.isRegistered) return false;
+    if (!_state.isRegistered || _state.isSupabaseMode) return false;
     _setBusy('Revoking paired dashboards...');
     if (_state.isSharing) {
       await _bridge.stopSharing();
@@ -415,6 +742,7 @@ class LocationController extends ChangeNotifier {
       clearLastUploadAt: true,
       clearLastFixAt: true,
       clearLastAccuracy: true,
+      clearLastCoords: true,
       hasPendingFix: false,
       clearPendingRecordedAt: true,
       clearLastError: true,
@@ -428,11 +756,7 @@ class LocationController extends ChangeNotifier {
   Future<bool> deleteStoredLocation() async {
     if (!_state.isRegistered) return false;
     _setBusy('Deleting stored location...');
-    final res = await _api.deleteStoredLocation(
-      serverUrl: _state.serverUrl,
-      deviceId: _state.deviceId,
-      deviceToken: _state.deviceToken,
-    );
+    final res = await _api.deleteLocationForBackend(_state);
     _clearBusy();
 
     if (!res.ok) {
@@ -442,15 +766,21 @@ class LocationController extends ChangeNotifier {
 
     await _bridge.clearLocationMetadata();
     _state = _state.copyWith(
+      presenceMode: PresenceMode.unknown,
+      clearCurrentPlaceId: true,
+      clearCurrentPlaceName: true,
+      homePrivacyMasked: false,
       clearLastUploadAt: true,
       clearLastFixAt: true,
       clearLastAccuracy: true,
+      clearLastCoords: true,
       hasPendingFix: false,
       clearPendingRecordedAt: true,
       clearLastError: true,
     );
     _statusMessage = 'Deleted stored location from the server.';
     notifyListeners();
+    await refreshFamilySnapshot(quiet: true);
     return true;
   }
 
@@ -461,11 +791,7 @@ class LocationController extends ChangeNotifier {
       await _bridge.stopSharing();
     }
 
-    final res = await _api.unregisterDevice(
-      serverUrl: _state.serverUrl,
-      deviceId: _state.deviceId,
-      deviceToken: _state.deviceToken,
-    );
+    final res = await _api.unregisterForBackend(_state);
 
     if (!res.ok && res.statusCode != 401) {
       _clearBusy();
@@ -477,8 +803,14 @@ class LocationController extends ChangeNotifier {
     }
 
     await _bridge.unregisterReset();
+    _family = const FamilySnapshot();
+    _selectedMemberDeviceId = null;
     _state = DeviceTrackerState(
+      backendMode: _state.backendMode,
       serverUrl: _state.serverUrl,
+      supabaseUrl: _state.supabaseUrl,
+      supabaseAnonKey: _state.supabaseAnonKey,
+      smartHomeMode: _state.smartHomeMode,
       deviceName: _state.deviceName,
       hasLocationPermission: _state.hasLocationPermission,
       hasFineLocation: _state.hasFineLocation,
@@ -503,8 +835,14 @@ class LocationController extends ChangeNotifier {
 
   Future<void> _handleRemoteUnregistered(String? serverError) async {
     await _bridge.unregisterReset();
+    _family = const FamilySnapshot();
+    _selectedMemberDeviceId = null;
     _state = DeviceTrackerState(
+      backendMode: _state.backendMode,
       serverUrl: _state.serverUrl,
+      supabaseUrl: _state.supabaseUrl,
+      supabaseAnonKey: _state.supabaseAnonKey,
+      smartHomeMode: _state.smartHomeMode,
       deviceName: _state.deviceName,
       hasLocationPermission: _state.hasLocationPermission,
       hasFineLocation: _state.hasFineLocation,

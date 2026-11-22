@@ -33,11 +33,19 @@ class InMemoryKeyValueStore : KeyValueStore {
 
     override fun getString(key: String): String? = synchronized(this) { map[key] }
 
-    override fun putString(key: String, value: String?) = synchronized(this) {
-        if (value == null) map.remove(key) else map[key] = value
+    override fun putString(key: String, value: String?) {
+        synchronized(this) {
+            if (value == null) {
+                map.remove(key)
+            } else {
+                map[key] = value
+            }
+        }
     }
 
-    override fun clear() = synchronized(this) { map.clear() }
+    override fun clear() {
+        synchronized(this) { map.clear() }
+    }
 }
 
 /**

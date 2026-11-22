@@ -1,7 +1,5 @@
-import java.util.Properties
-
 pluginManagement {
-    val localProps = Properties()
+    val localProps = java.util.Properties()
     val localPropsFile = file("local.properties")
     if (localPropsFile.exists()) {
         localPropsFile.inputStream().use { localProps.load(it) }

@@ -54,14 +54,25 @@
         this.centerLat = 37.7749;
         this.centerLng = -122.4194;
         this.zoom = 13;
-        this.osmTilesEnabled = false;
+        this.providerId = 'esri_street';
+        this.osmTilesEnabled = true;
         this.tileCache = {};
+        this.googleStage = options.googleStage || null;
+        this.googleMapsApiKey = options.googleMapsApiKey || '';
+        this.onMapAuthError = options.onMapAuthError || function () {};
+        this._googleMap = null;
+        this._googleMarkers = {};
+        this._googleCircles = {};
+        this._suppressGoogleSync = false;
 
         this.devices = [];
+        this.places = [];
         this.selectedDeviceId = null;
         this.hasAutoCentered = false;
+        this._pickLocationCallback = null;
 
         this.isDragging = false;
+        this.didDragMove = false;
         this.dragStartX = 0;
         this.dragStartY = 0;
         this.dragStartWorld = null;
@@ -82,6 +93,7 @@
                 return;
             }
             self.isDragging = true;
+            self.didDragMove = false;
             self.dragStartX = e.clientX;
             self.dragStartY = e.clientY;
             self.dragStartWorld = latLngToWorldPx(self.centerLat, self.centerLng, self.zoom);
@@ -93,6 +105,9 @@
             }
             var dx = e.clientX - self.dragStartX;
             var dy = e.clientY - self.dragStartY;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+                self.didDragMove = true;
+            }
             var nextWorldX = self.dragStartWorld.x - dx;
             var nextWorldY = self.dragStartWorld.y - dy;
             var nextCenter = worldPxToLatLng(nextWorldX, nextWorldY, self.zoom);
@@ -101,9 +116,25 @@
             self.render();
         });
 
-        window.addEventListener('mouseup', function () {
+        window.addEventListener('mouseup', function (e) {
+            var wasClick = self.isDragging && !self.didDragMove;
             self.isDragging = false;
             self.dragStartWorld = null;
+            if (wasClick && typeof self._pickLocationCallback === 'function') {
+                var rect = self.viewport.getBoundingClientRect();
+                var clickX = e.clientX - rect.left;
+                var clickY = e.clientY - rect.top;
+                if (clickX >= 0 && clickX <= rect.width && clickY >= 0 && clickY <= rect.height) {
+                    var centerWorld = latLngToWorldPx(self.centerLat, self.centerLng, self.zoom);
+                    var worldX = centerWorld.x - (self.width / 2) + clickX;
+                    var worldY = centerWorld.y - (self.height / 2) + clickY;
+                    var picked = worldPxToLatLng(worldX, worldY, self.zoom);
+                    var cb = self._pickLocationCallback;
+                    self._pickLocationCallback = null;
+                    self.viewport.classList.remove('pick-mode');
+                    cb(picked.lat, picked.lng);
+                }
+            }
         });
 
         this.viewport.addEventListener('wheel', function (e) {
@@ -127,9 +158,312 @@
         this.render();
     };
 
-    LocaShareMap.prototype.setOsmTilesEnabled = function (enabled) {
-        this.osmTilesEnabled = Boolean(enabled);
+    LocaShareMap.prototype.setPlaces = function (places) {
+        this.places = Array.isArray(places) ? places : [];
         this.render();
+    };
+
+    LocaShareMap.prototype.enableLocationPick = function (callback) {
+        this._pickLocationCallback = typeof callback === 'function' ? callback : null;
+        if (this.viewport) {
+            if (this._pickLocationCallback) {
+                this.viewport.classList.add('pick-mode');
+            } else {
+                this.viewport.classList.remove('pick-mode');
+            }
+        }
+    };
+
+    LocaShareMap.prototype.centerOnCoords = function (lat, lng, targetZoom) {
+        if (typeof lat !== 'number' || typeof lng !== 'number') {
+            return;
+        }
+        this.centerLat = lat;
+        this.centerLng = lng;
+        if (typeof targetZoom === 'number') {
+            this.zoom = clamp(targetZoom, MIN_ZOOM, MAX_ZOOM);
+        }
+        this.render();
+    };
+
+    var TILE_PROVIDERS = {
+        esri_street: {
+            id: 'esri_street',
+            layers: ['https://services.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}']
+        },
+        esri_hybrid: {
+            id: 'esri_hybrid',
+            layers: [
+                'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+                'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'
+            ]
+        },
+        esri_satellite: {
+            id: 'esri_satellite',
+            layers: ['https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']
+        },
+        osm: {
+            id: 'osm',
+            layers: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png']
+        },
+        grid: {
+            id: 'grid',
+            layers: []
+        }
+    };
+
+    function buildTileUrl(template, z, x, y) {
+        return template
+            .replace('{z}', String(z))
+            .replace('{x}', String(x))
+            .replace('{y}', String(y));
+    }
+
+    var googleMapsLoadCallbacks = [];
+    var googleMapsLoadState = 'idle';
+
+    window.locashareOnGoogleMapsReady = function () {
+        googleMapsLoadState = 'ready';
+        var callbacks = googleMapsLoadCallbacks.slice();
+        googleMapsLoadCallbacks = [];
+        for (var i = 0; i < callbacks.length; i++) {
+            callbacks[i]();
+        }
+    };
+
+    LocaShareMap.prototype.setGoogleMapsApiKey = function (apiKey) {
+        this.googleMapsApiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+    };
+
+    LocaShareMap.prototype._isGoogleMode = function () {
+        return this.providerId === 'google_roadmap' || this.providerId === 'google_hybrid';
+    };
+
+    LocaShareMap.prototype.setProvider = function (providerId) {
+        var nextId = (TILE_PROVIDERS[providerId] || providerId === 'google_roadmap' || providerId === 'google_hybrid')
+            ? providerId
+            : 'esri_street';
+        if ((nextId === 'google_roadmap' || nextId === 'google_hybrid') && !this.googleMapsApiKey) {
+            nextId = 'esri_street';
+        }
+        this.providerId = nextId;
+        if (this._isGoogleMode()) {
+            this.osmTilesEnabled = false;
+            if (this.googleStage) {
+                this.googleStage.classList.remove('hidden');
+            }
+            this._syncGoogleMap();
+            return;
+        }
+        var provider = TILE_PROVIDERS[nextId] || TILE_PROVIDERS.esri_street;
+        this.osmTilesEnabled = provider.layers.length > 0;
+        if (this.googleStage) {
+            this.googleStage.classList.add('hidden');
+        }
+        this.render();
+    };
+
+    LocaShareMap.prototype.setOsmTilesEnabled = function (enabled) {
+        this.setProvider(enabled ? 'osm' : 'grid');
+    };
+
+    LocaShareMap.prototype._ensureGoogleMapsSdk = function () {
+        var self = this;
+        if (window.google && window.google.maps && typeof window.google.maps.Map === 'function') {
+            this._initGoogleMapInstance();
+            return;
+        }
+        googleMapsLoadCallbacks.push(function () {
+            if (self._isGoogleMode()) {
+                self._initGoogleMapInstance();
+            }
+        });
+        if (googleMapsLoadState === 'loading' || googleMapsLoadState === 'ready') {
+            return;
+        }
+        if (!this.googleMapsApiKey) {
+            this.onMapAuthError('Google Maps API key is not configured.');
+            return;
+        }
+        googleMapsLoadState = 'loading';
+        window.gm_authFailure = function () {
+            googleMapsLoadState = 'error';
+            self.onMapAuthError('Google Maps API key was rejected or restricted for this domain.');
+        };
+        var script = document.createElement('script');
+        script.src = 'https://maps.googleapis.com/maps/api/js?key='
+            + encodeURIComponent(this.googleMapsApiKey)
+            + '&callback=locashareOnGoogleMapsReady';
+        script.async = true;
+        script.onerror = function () {
+            googleMapsLoadState = 'error';
+            self.onMapAuthError('Failed to load Google Maps JavaScript API.');
+        };
+        if (document.head) {
+            document.head.appendChild(script);
+        }
+    };
+
+    LocaShareMap.prototype._initGoogleMapInstance = function () {
+        if (!this.googleStage || !(window.google && window.google.maps && window.google.maps.Map)) {
+            return;
+        }
+        if (!this._googleMap) {
+            var self = this;
+            this._googleMap = new window.google.maps.Map(this.googleStage, {
+                center: { lat: this.centerLat, lng: this.centerLng },
+                zoom: this.zoom,
+                mapTypeId: this.providerId === 'google_hybrid' ? 'hybrid' : 'roadmap',
+                streetViewControl: false,
+                fullscreenControl: false,
+                mapTypeControl: false,
+                zoomControl: false
+            });
+            this._googleMap.addListener('idle', function () {
+                if (!self._googleMap || self._suppressGoogleSync) {
+                    return;
+                }
+                var c = self._googleMap.getCenter();
+                var z = self._googleMap.getZoom();
+                if (c) {
+                    self.centerLat = c.lat();
+                    self.centerLng = c.lng();
+                }
+                if (typeof z === 'number') {
+                    self.zoom = clamp(Math.round(z), MIN_ZOOM, MAX_ZOOM);
+                }
+            });
+        }
+        this._syncGoogleMap();
+    };
+
+    LocaShareMap.prototype._markerColorForDevice = function (dev, isSelected) {
+        if (isSelected) {
+            return '#38bdf8';
+        }
+        if (!dev.is_online) {
+            return '#94a3b8';
+        }
+        return dev.is_location_stale ? '#f59e0b' : '#22c55e';
+    };
+
+    LocaShareMap.prototype._syncGoogleMap = function () {
+        if (this.markersLayer) {
+            this.markersLayer.textContent = '';
+        }
+        if (this.googleStage) {
+            this.googleStage.classList.remove('hidden');
+        }
+        if (!this._googleMap) {
+            this._ensureGoogleMapsSdk();
+            return;
+        }
+        var targetType = this.providerId === 'google_hybrid' ? 'hybrid' : 'roadmap';
+        if (this._googleMap.getMapTypeId() !== targetType) {
+            this._googleMap.setMapTypeId(targetType);
+        }
+        var gCenter = this._googleMap.getCenter();
+        var gZoom = this._googleMap.getZoom();
+        this._suppressGoogleSync = true;
+        try {
+            if (!gCenter || Math.abs(gCenter.lat() - this.centerLat) > 1e-5 || Math.abs(gCenter.lng() - this.centerLng) > 1e-5) {
+                this._googleMap.setCenter({ lat: this.centerLat, lng: this.centerLng });
+            }
+            if (typeof gZoom !== 'number' || Math.round(gZoom) !== Math.round(this.zoom)) {
+                this._googleMap.setZoom(Math.round(this.zoom));
+            }
+        } finally {
+            this._suppressGoogleSync = false;
+        }
+        this._syncGoogleMarkers();
+    };
+
+    LocaShareMap.prototype._syncGoogleMarkers = function () {
+        if (!this._googleMap || !(window.google && window.google.maps)) {
+            return;
+        }
+        var self = this;
+        var activeIds = {};
+        var devices = this.devices || [];
+
+        for (var i = 0; i < devices.length; i++) {
+            var dev = devices[i];
+            var loc = dev && dev.has_location ? dev.location : null;
+            if (!loc || typeof loc.latitude !== 'number' || typeof loc.longitude !== 'number') {
+                continue;
+            }
+            var id = dev.device_id;
+            activeIds[id] = true;
+            var pos = { lat: loc.latitude, lng: loc.longitude };
+            var isSelected = id === this.selectedDeviceId;
+            var color = this._markerColorForDevice(dev, isSelected);
+            var icon = {
+                path: window.google.maps.SymbolPath.CIRCLE,
+                fillColor: color,
+                fillOpacity: 1,
+                strokeColor: '#ffffff',
+                strokeWeight: isSelected ? 3 : 2,
+                scale: isSelected ? 10 : 8
+            };
+
+            if (!this._googleMarkers[id]) {
+                (function (deviceId) {
+                    var marker = new window.google.maps.Marker({
+                        position: pos,
+                        map: self._googleMap,
+                        title: dev.device_name || deviceId,
+                        icon: icon
+                    });
+                    marker.addListener('click', function () {
+                        self.onSelectDevice(deviceId, true);
+                    });
+                    self._googleMarkers[id] = marker;
+                })(id);
+            } else {
+                this._googleMarkers[id].setPosition(pos);
+                this._googleMarkers[id].setTitle(dev.device_name || id);
+                this._googleMarkers[id].setIcon(icon);
+                this._googleMarkers[id].setZIndex(isSelected ? 100 : 10);
+            }
+
+            var accuracy = typeof loc.accuracy_meters === 'number' && loc.accuracy_meters > 0 ? loc.accuracy_meters : 0;
+            if (accuracy > 0) {
+                if (!this._googleCircles[id]) {
+                    this._googleCircles[id] = new window.google.maps.Circle({
+                        map: this._googleMap,
+                        center: pos,
+                        radius: accuracy,
+                        fillColor: color,
+                        fillOpacity: 0.14,
+                        strokeColor: color,
+                        strokeOpacity: 0.55,
+                        strokeWeight: 1.5,
+                        clickable: false
+                    });
+                } else {
+                    this._googleCircles[id].setCenter(pos);
+                    this._googleCircles[id].setRadius(accuracy);
+                    this._googleCircles[id].setOptions({ fillColor: color, strokeColor: color });
+                }
+            } else if (this._googleCircles[id]) {
+                this._googleCircles[id].setMap(null);
+                delete this._googleCircles[id];
+            }
+        }
+
+        Object.keys(this._googleMarkers).forEach(function (existingId) {
+            if (!activeIds[existingId]) {
+                self._googleMarkers[existingId].setMap(null);
+                delete self._googleMarkers[existingId];
+            }
+        });
+        Object.keys(this._googleCircles).forEach(function (existingId) {
+            if (!activeIds[existingId]) {
+                self._googleCircles[existingId].setMap(null);
+                delete self._googleCircles[existingId];
+            }
+        });
     };
 
     LocaShareMap.prototype.setZoom = function (newZoom) {
@@ -157,6 +491,34 @@
             }
         }
 
+        this.render();
+    };
+
+    LocaShareMap.prototype.setPlaces = function (places) {
+        this.places = Array.isArray(places) ? places : [];
+        this.render();
+    };
+
+    LocaShareMap.prototype.enableLocationPick = function (callback) {
+        this._pickLocationCallback = typeof callback === 'function' ? callback : null;
+        if (this.viewport) {
+            if (this._pickLocationCallback) {
+                this.viewport.classList.add('pick-mode');
+            } else {
+                this.viewport.classList.remove('pick-mode');
+            }
+        }
+    };
+
+    LocaShareMap.prototype.centerOnCoords = function (lat, lng, targetZoom) {
+        if (typeof lat !== 'number' || typeof lng !== 'number') {
+            return;
+        }
+        this.centerLat = lat;
+        this.centerLng = lng;
+        if (typeof targetZoom === 'number') {
+            this.zoom = clamp(targetZoom, MIN_ZOOM, MAX_ZOOM);
+        }
         this.render();
     };
 
@@ -222,34 +584,113 @@
         this.render();
     };
 
+    LocaShareMap.prototype._loadLayerImage = function (url, onUpdate) {
+        if (this.tileCache[url]) {
+            var existing = this.tileCache[url];
+            if (!existing.loaded && !existing.failed && typeof onUpdate === 'function') {
+                existing.listeners.push(onUpdate);
+            }
+            return existing;
+        }
+        var self = this;
+        var img = new Image();
+        img.referrerPolicy = 'strict-origin-when-cross-origin';
+        var entry = {
+            img: img,
+            loaded: false,
+            failed: false,
+            listeners: typeof onUpdate === 'function' ? [onUpdate] : []
+        };
+        this.tileCache[url] = entry;
+
+        function notifyListeners() {
+            var list = entry.listeners.slice();
+            entry.listeners = [];
+            for (var i = 0; i < list.length; i++) {
+                list[i]();
+            }
+        }
+
+        img.onload = function () {
+            entry.loaded = true;
+            notifyListeners();
+            self.render();
+        };
+        img.onerror = function () {
+            entry.failed = true;
+            notifyListeners();
+        };
+        img.src = url;
+        return entry;
+    };
+
+    LocaShareMap.prototype._getCompositeTileImage = function (provider, z, wrappedX, y) {
+        var compKey = 'composite|' + provider.id + '|' + z + '/' + wrappedX + '/' + y;
+        if (this.tileCache[compKey]) {
+            return this.tileCache[compKey];
+        }
+        var self = this;
+        var offscreen = document.createElement('canvas');
+        offscreen.width = TILE_SIZE;
+        offscreen.height = TILE_SIZE;
+        var compEntry = { img: offscreen, loaded: false, failed: false };
+        this.tileCache[compKey] = compEntry;
+        var layerEntries = [];
+
+        function rebuildComposite() {
+            var base = layerEntries[0];
+            if (base && base.failed) {
+                compEntry.failed = true;
+            }
+            if (!base || !base.loaded) {
+                return;
+            }
+            var octx = offscreen.getContext ? offscreen.getContext('2d') : null;
+            if (octx) {
+                octx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
+                for (var j = 0; j < layerEntries.length; j++) {
+                    if (layerEntries[j] && layerEntries[j].loaded) {
+                        try {
+                            octx.drawImage(layerEntries[j].img, 0, 0, TILE_SIZE, TILE_SIZE);
+                        } catch (e) {
+                            // Ignore transient decode error on optional overlay layer
+                        }
+                    }
+                }
+            }
+            compEntry.loaded = true;
+            self.render();
+        }
+
+        for (var i = 0; i < provider.layers.length; i++) {
+            var layerUrl = buildTileUrl(provider.layers[i], z, wrappedX, y);
+            layerEntries.push(this._loadLayerImage(layerUrl, rebuildComposite));
+        }
+        rebuildComposite();
+        return compEntry;
+    };
+
     LocaShareMap.prototype._getTileImage = function (z, x, y) {
+        var provider = TILE_PROVIDERS[this.providerId] || TILE_PROVIDERS.esri_street;
+        if (!provider || !provider.layers || provider.layers.length === 0) {
+            return null;
+        }
         var maxTile = Math.pow(2, z);
         var wrappedX = ((x % maxTile) + maxTile) % maxTile;
         if (y < 0 || y >= maxTile) {
             return null;
         }
-        var key = z + '/' + wrappedX + '/' + y;
-        if (this.tileCache[key]) {
-            return this.tileCache[key];
+        if (provider.layers.length === 1) {
+            return this._loadLayerImage(buildTileUrl(provider.layers[0], z, wrappedX, y));
         }
-        var self = this;
-        var img = new Image();
-        img.crossOrigin = 'anonymous';
-        var entry = { img: img, loaded: false, failed: false };
-        this.tileCache[key] = entry;
-
-        img.onload = function () {
-            entry.loaded = true;
-            self.render();
-        };
-        img.onerror = function () {
-            entry.failed = true;
-        };
-        img.src = 'https://tile.openstreetmap.org/' + key + '.png';
-        return entry;
+        return this._getCompositeTileImage(provider, z, wrappedX, y);
     };
 
     LocaShareMap.prototype.render = function () {
+        if (this._isGoogleMode()) {
+            this._syncGoogleMap();
+            return;
+        }
         if (!this.ctx || !this.width || !this.height) {
             return;
         }
@@ -291,8 +732,38 @@
         // 2. Coordinate Graticule Grid (always visible in Privacy Grid mode, subtle when tiles loaded)
         this._drawGraticule(ctx, w, h, z, topLeftWorldX, topLeftWorldY);
 
-        // 3. Draw Accuracy Circles for devices with location fixes
+        // 3. Draw Saved Place Geofence Circles (Home, School, Work, Custom)
         var self = this;
+        var placeColors = {
+            home: { fill: 'rgba(16, 185, 129, 0.14)', stroke: 'rgba(16, 185, 129, 0.85)' },
+            school: { fill: 'rgba(139, 92, 246, 0.14)', stroke: 'rgba(139, 92, 246, 0.85)' },
+            work: { fill: 'rgba(245, 158, 11, 0.14)', stroke: 'rgba(245, 158, 11, 0.85)' },
+            custom: { fill: 'rgba(14, 165, 233, 0.14)', stroke: 'rgba(14, 165, 233, 0.85)' }
+        };
+        (this.places || []).forEach(function (pl) {
+            if (typeof pl.latitude !== 'number' || typeof pl.longitude !== 'number') {
+                return;
+            }
+            var pt = latLngToWorldPx(pl.latitude, pl.longitude, z);
+            var screenX = pt.x - topLeftWorldX;
+            var screenY = pt.y - topLeftWorldY;
+            var mpp = metersPerPixel(pl.latitude, z);
+            var radiusPx = clamp((pl.radius_meters || 150) / mpp, 14, Math.max(w, h));
+            var palette = placeColors[pl.category] || placeColors.custom;
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(screenX, screenY, radiusPx, 0, Math.PI * 2);
+            ctx.fillStyle = palette.fill;
+            ctx.fill();
+            ctx.setLineDash([6, 4]);
+            ctx.lineWidth = pl.is_home ? 2.4 : 1.8;
+            ctx.strokeStyle = palette.stroke;
+            ctx.stroke();
+            ctx.restore();
+        });
+
+        // 4. Draw Accuracy Circles for devices with location fixes
         this.devices.forEach(function (dev) {
             if (!dev.has_location || !dev.location) {
                 return;
@@ -415,9 +886,33 @@
         if (!this.markersLayer) {
             return;
         }
-        this.markersLayer.innerHTML = '';
+        this.markersLayer.textContent = '';
 
         var self = this;
+
+        // Render Saved Place labels
+        (this.places || []).forEach(function (pl) {
+            if (typeof pl.latitude !== 'number' || typeof pl.longitude !== 'number') {
+                return;
+            }
+            var pt = latLngToWorldPx(pl.latitude, pl.longitude, self.zoom);
+            var sx = pt.x - topLeftWorldX;
+            var sy = pt.y - topLeftWorldY;
+            if (sx < -60 || sx > self.width + 60 || sy < -60 || sy > self.height + 60) {
+                return;
+            }
+            var pm = document.createElement('div');
+            pm.className = 'map-marker';
+            pm.style.left = Math.round(sx) + 'px';
+            pm.style.top = Math.round(sy) + 'px';
+            var badge = document.createElement('div');
+            badge.className = 'place-marker-badge';
+            var prefix = pl.is_home ? 'HOME · ' : (pl.category ? pl.category.toUpperCase() + ' · ' : '');
+            badge.textContent = prefix + pl.name + ' (' + (pl.radius_meters || 150) + 'm)';
+            pm.appendChild(badge);
+            self.markersLayer.appendChild(pm);
+        });
+
         this.devices.forEach(function (dev) {
             if (!dev.has_location || !dev.location) {
                 return;
@@ -447,12 +942,23 @@
 
             var pin = document.createElement('div');
             pin.className = 'marker-pin';
+            if (dev.avatar_color) {
+                pin.style.backgroundColor = dev.avatar_color;
+            }
             marker.appendChild(pin);
 
             var label = document.createElement('div');
             label.className = 'marker-label';
+            var presenceSuffix = '';
+            if (dev.presence_mode === 'at_home') {
+                presenceSuffix = ' · At Home';
+            } else if (dev.presence_mode === 'at_place' && dev.current_place_name) {
+                presenceSuffix = ' · At ' + dev.current_place_name;
+            } else if (dev.presence_mode === 'away') {
+                presenceSuffix = ' · Away';
+            }
             var stateSuffix = dev.is_location_stale ? ' (Stale Fix)' : (!dev.is_online ? ' (Offline)' : '');
-            label.textContent = dev.device_name + stateSuffix;
+            label.textContent = (dev.member_name || dev.device_name) + presenceSuffix + stateSuffix;
             marker.appendChild(label);
 
             marker.addEventListener('click', function (e) {
